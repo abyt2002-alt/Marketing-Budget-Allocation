@@ -6,9 +6,11 @@ from app.services.engine import (
     SCENARIO_PAGE_SIZE_DEFAULT,
     SCENARIO_PAGE_SIZE_MAX,
     ScenarioJobCreateRequest,
+    ScenarioSummaryRequest,
     service_create_scenario_job,
     service_get_scenario_job_results,
     service_get_scenario_job_status,
+    service_scenario_summary,
 )
 
 router = APIRouter(tags=["scenarios"])
@@ -36,6 +38,8 @@ async def get_scenario_job_results(
     max_volume_uplift_pct: float | None = Query(None),
     min_revenue_uplift_pct: float | None = Query(None),
     max_revenue_uplift_pct: float | None = Query(None),
+    min_budget_utilized_pct: float | None = Query(None),
+    max_budget_utilized_pct: float | None = Query(None),
 ) -> Any:
     return service_get_scenario_job_results(
         job_id=job_id,
@@ -48,5 +52,11 @@ async def get_scenario_job_results(
         max_volume_uplift_pct=max_volume_uplift_pct,
         min_revenue_uplift_pct=min_revenue_uplift_pct,
         max_revenue_uplift_pct=max_revenue_uplift_pct,
+        min_budget_utilized_pct=min_budget_utilized_pct,
+        max_budget_utilized_pct=max_budget_utilized_pct,
     )
 
+
+@router.post("/api/scenarios/summary")
+async def scenario_summary(payload: ScenarioSummaryRequest) -> dict[str, Any]:
+    return service_scenario_summary(payload)

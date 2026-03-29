@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import axios from 'axios'
 import {
+  Activity,
   BarChart3,
   Bot,
   ChevronDown,
   ChevronUp,
   CheckCircle2,
+  LoaderCircle,
   ShieldCheck,
   SlidersHorizontal,
   Target,
@@ -86,6 +88,11 @@ type OptimizeAutoResponse = {
     weighted_digital_share: number
     baseline_budget?: number
     optimized_budget?: number
+    requested_target_budget?: number
+    adjusted_target_budget?: number
+    target_within_feasible?: boolean
+    feasible_min_budget?: number
+    feasible_max_budget?: number
     budget_constraint_value?: number
     total_new_spend?: number
     total_volume_uplift?: number
@@ -99,6 +106,10 @@ type OptimizeAutoResponse = {
 type BrandAllocationRow = {
   brand: string
   baseline_budget: number
+  min_allowed_budget?: number
+  max_allowed_budget?: number
+  min_change_pct?: number
+  max_change_pct?: number
   baseline_volume?: number
   avg_price_last_3_points?: number
   base_elasticity?: number
@@ -202,6 +213,20 @@ type ScenarioItem = {
   weighted_digital_share: number
   total_new_spend: number
   markets: AllocationRow[]
+}
+
+type ScenarioMarketFlowRow = {
+  market: string
+  old_budget_share_pct: number
+  new_budget_share_pct: number
+  budget_share_change_pct: number
+  spend_delta_mn: number
+  old_tv_split_pct: number
+  new_tv_split_pct: number
+  tv_split_change_pct: number
+  old_digital_split_pct: number
+  new_digital_split_pct: number
+  digital_split_change_pct: number
 }
 
 type ScenarioResultsResponse = {
@@ -432,8 +457,55 @@ type AIInsightsMarketCard = {
   digital_effectiveness_pct?: number
   tv_zone?: string
   digital_zone?: string
+  category_salience_pct?: number
+  brand_market_share_pct?: number
+  leader_rank?: number
+  leader_position?: string
+  leader_brand?: string
+  is_market_leader?: boolean
+  media_responsiveness_pct?: number
+  investment_quadrant?: string
   headroom_pct: number
   recommendation_action: string
+}
+
+type AIInsightsSignalSnapshot = {
+  insights_brand: string
+  insights_market: string
+  yoy: {
+    latest_fiscal_year: string
+    latest_yoy_growth_pct: number
+    latest_volume_mn: number
+  }
+  s_curve: {
+    tv_points: number
+    digital_points: number
+    tv_first_uplift_pct: number
+    tv_last_uplift_pct: number
+    dg_first_uplift_pct: number
+    dg_last_uplift_pct: number
+  }
+  contribution_top: Array<{
+    variable: string
+    abs: number
+    share_pct: number
+  }>
+}
+
+type AIInsightsPortfolioMetrics = {
+  avg_yoy_growth_pct: number
+  median_yoy_growth_pct: number
+  positive_yoy_states: number
+  negative_yoy_states: number
+  median_headroom_pct: number
+  avg_tv_effectiveness_pct: number
+  avg_digital_effectiveness_pct: number
+  tv_effective_states: number
+  digital_effective_states: number
+  avg_category_salience_pct: number
+  market_leader_states: number
+  top_opportunity_states: string[]
+  top_risk_states: string[]
 }
 
 type AIInsightsSummaryResponse = {
@@ -470,6 +542,18 @@ type AIInsightsSummaryResponse = {
     stable_core: string[]
     recovery_priority: string[]
   }
+  investment_framework?: {
+    salience_threshold_pct: number
+    responsiveness_threshold_pct: number
+    quadrant_counts: {
+      increase_media_investments: number
+      maintain_high_salience: number
+      maintain_selective: number
+      scale_back: number
+    }
+  }
+  signal_snapshot?: AIInsightsSignalSnapshot
+  portfolio_metrics?: AIInsightsPortfolioMetrics
   market_cards: AIInsightsMarketCard[]
   ai_brief: string
   ai_summary_json?: AIInsightsSummaryJson | null
@@ -479,6 +563,21 @@ type AIInsightsSummaryResponse = {
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8020'
 const normalizeBrandKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '')
+const SCENARIO_PROGRESS_STAGES = [
+  { key: 'queued', label: 'Queued', hint: 'Preparing run context and brand-market payload.', start: 0, end: 10 },
+  { key: 'intent', label: 'AI Intent', hint: 'Translating business intent into strategy controls.', start: 10, end: 32 },
+  { key: 'sampling', label: 'Sampling', hint: 'Generating diverse feasible scenarios with constraints.', start: 32, end: 76 },
+  { key: 'ranking', label: 'Ranking', hint: 'Scoring and ranking by volume and revenue outcomes.', start: 76, end: 101 },
+] as const
+
+function getShareGreenColor(sharePct: number) {
+  const clamped = Math.max(0, Math.min(100, Number(sharePct) || 0))
+  const t = clamped / 100
+  const hue = 155 - t * 30
+  const saturation = 40 + t * 34
+  const lightness = 84 - t * 46
+  return `hsl(${hue.toFixed(1)}, ${saturation.toFixed(1)}%, ${lightness.toFixed(1)}%)`
+}
 
 function App() {
   const [loadingConfig, setLoadingConfig] = useState(true)
@@ -487,9 +586,10 @@ function App() {
   const [selectedBrand, setSelectedBrand] = useState('')
   const [selectedMarkets, setSelectedMarkets] = useState<string[]>([])
   const [marketSearch, setMarketSearch] = useState('')
+  const [marketDropdownOpen, setMarketDropdownOpen] = useState(false)
   const [budgetType, setBudgetType] = useState<'percentage' | 'absolute'>('percentage')
   const [budgetValue, setBudgetValue] = useState<number>(5)
-  const [constraintsOpen, setConstraintsOpen] = useState(true)
+  const [constraintsOpen, setConstraintsOpen] = useState(false)
   const [constraintMarket, setConstraintMarket] = useState<string>('')
 
   const [isSubmitting, setIsSubmitting] = useState(false)
@@ -498,26 +598,36 @@ function App() {
   const [brandAllocation, setBrandAllocation] = useState<BrandAllocationResponse | null>(null)
   const [brandAllocationLoading, setBrandAllocationLoading] = useState(false)
   const [step1Error, setStep1Error] = useState('')
+  const [step1BaselineBudget, setStep1BaselineBudget] = useState<number | null>(null)
+  const [step1BaselineLoading, setStep1BaselineLoading] = useState(false)
+  const [step1EditMode, setStep1EditMode] = useState(false)
+  const [step1EditError, setStep1EditError] = useState('')
+  const [step1AllocationDraft, setStep1AllocationDraft] = useState<Record<string, string>>({})
   const [constraintsPreview, setConstraintsPreview] = useState<OptimizeAutoResponse | null>(null)
   const [constraintsLoading, setConstraintsLoading] = useState(false)
   const [marketOverrides, setMarketOverrides] = useState<Record<string, MarketOverride>>({})
   const [activeMainTab, setActiveMainTab] = useState<'s_curves' | 'budget_allocation'>('s_curves')
   const [step2Enabled, setStep2Enabled] = useState(false)
+  const [step2SetupCollapsed, setStep2SetupCollapsed] = useState(false)
   const [step1Collapsed, setStep1Collapsed] = useState(false)
   const [scenarioIntent, setScenarioIntent] = useState('')
   const [scenarioJobId, setScenarioJobId] = useState('')
   const [scenarioStatus, setScenarioStatus] = useState<'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'expired'>('idle')
   const [scenarioProgress, setScenarioProgress] = useState(0)
   const [scenarioMessage, setScenarioMessage] = useState('')
+  const [scenarioStartedAt, setScenarioStartedAt] = useState<number | null>(null)
+  const [scenarioElapsedMs, setScenarioElapsedMs] = useState(0)
   const [scenarioError, setScenarioError] = useState('')
   const [scenarioResults, setScenarioResults] = useState<ScenarioResultsResponse | null>(null)
   const [selectedScenarioId, setSelectedScenarioId] = useState('')
   const [scenarioPage, setScenarioPage] = useState(1)
-  const [scenarioPageSize, setScenarioPageSize] = useState(12)
+  const scenarioPageSize = 5
   const [scenarioSortKey, setScenarioSortKey] = useState('revenue_uplift_pct')
   const [scenarioSortDir, setScenarioSortDir] = useState<'asc' | 'desc'>('desc')
-  const [scenarioMinVolumePct, setScenarioMinVolumePct] = useState('')
   const [scenarioMinRevenuePct, setScenarioMinRevenuePct] = useState('')
+  const [scenarioMaxBudgetUtilizedPctFilter, setScenarioMaxBudgetUtilizedPctFilter] = useState('')
+  const [scenarioFlowSortKey, setScenarioFlowSortKey] = useState<'share' | 'spend'>('share')
+  const [scenarioMarketModal, setScenarioMarketModal] = useState<{ row: ScenarioMarketFlowRow; tone: 'increase' | 'decrease' } | null>(null)
   const [sCurvesData, setSCurvesData] = useState<SCurvesResponse | null>(null)
   const [sCurvesLoading, setSCurvesLoading] = useState(false)
   const [sCurvesError, setSCurvesError] = useState('')
@@ -535,6 +645,7 @@ function App() {
   const [aiModeError, setAiModeError] = useState('')
   const [aiModeData, setAiModeData] = useState<AIInsightsSummaryResponse | null>(null)
   const latestInsightsSelectionRef = useRef<{ brand: string; market: string }>({ brand: '', market: '' })
+  const marketDropdownRef = useRef<HTMLDivElement | null>(null)
   const sCurveRequestSeqRef = useRef(0)
   const contributionRequestSeqRef = useRef(0)
   const yoyRequestSeqRef = useRef(0)
@@ -585,6 +696,102 @@ function App() {
     return sCurveStates[safeIdx]
   }, [sCurveStates, sCurveStateIndex])
 
+  const ABSOLUTE_BUDGET_UNIT_MN = 1_000_000
+
+  function toBackendBudgetValue(type: 'percentage' | 'absolute', value: number) {
+    if (type === 'absolute') {
+      return value * ABSOLUTE_BUDGET_UNIT_MN
+    }
+    return value
+  }
+
+  function getStep2BudgetInput() {
+    if (!brandAllocation || !selectedBrand) {
+      return { budget_increase_type: budgetType as 'percentage' | 'absolute', budget_increase_value: budgetValue }
+    }
+    const row = brandAllocation.allocation_rows.find((item) => item.brand === selectedBrand)
+    if (!row) {
+      return { budget_increase_type: budgetType as 'percentage' | 'absolute', budget_increase_value: budgetValue }
+    }
+    return {
+      budget_increase_type: 'absolute' as const,
+      budget_increase_value: (row.allocated_budget - row.baseline_budget) / ABSOLUTE_BUDGET_UNIT_MN,
+    }
+  }
+
+  function getStep2ScenarioBudgetBand() {
+    if (!brandAllocation || !selectedBrand) return null
+    const row = brandAllocation.allocation_rows.find((item) => item.brand === selectedBrand)
+    if (!row) return null
+    const upper = Number(row.allocated_budget)
+    if (!Number.isFinite(upper) || upper <= 0) return null
+    return {
+      scenario_budget_lower: 0.8 * upper,
+      scenario_budget_upper: upper,
+    }
+  }
+
+  function resolveScenarioBudgetInput(input: { budget_increase_type: 'percentage' | 'absolute'; budget_increase_value: number }) {
+    const backendInput = {
+      budget_increase_type: input.budget_increase_type,
+      budget_increase_value: toBackendBudgetValue(input.budget_increase_type, input.budget_increase_value),
+    }
+    const baselineBudget = Number(constraintsPreview?.summary.baseline_budget)
+    const feasibleMinBudget = Number(constraintsPreview?.summary.feasible_min_budget)
+    const feasibleMaxBudget = Number(constraintsPreview?.summary.feasible_max_budget)
+    if (
+      !Number.isFinite(baselineBudget) ||
+      !Number.isFinite(feasibleMinBudget) ||
+      !Number.isFinite(feasibleMaxBudget)
+    ) {
+      return {
+        payload: backendInput,
+        adjusted: false,
+        requestedTargetBudget: null as number | null,
+        adjustedTargetBudget: null as number | null,
+        feasibleMinBudget: null as number | null,
+        feasibleMaxBudget: null as number | null,
+      }
+    }
+    const requestedTargetBudget =
+      backendInput.budget_increase_type === 'percentage'
+        ? baselineBudget * (1 + backendInput.budget_increase_value / 100)
+        : baselineBudget + backendInput.budget_increase_value
+    if (!Number.isFinite(requestedTargetBudget)) {
+      return {
+        payload: backendInput,
+        adjusted: false,
+        requestedTargetBudget: null as number | null,
+        adjustedTargetBudget: null as number | null,
+        feasibleMinBudget,
+        feasibleMaxBudget,
+      }
+    }
+    const adjustedTargetBudget = Math.min(Math.max(requestedTargetBudget, feasibleMinBudget), feasibleMaxBudget)
+    const eps = Math.max(1, 1e-8 * Math.abs(requestedTargetBudget))
+    if (Math.abs(adjustedTargetBudget - requestedTargetBudget) <= eps) {
+      return {
+        payload: backendInput,
+        adjusted: false,
+        requestedTargetBudget,
+        adjustedTargetBudget,
+        feasibleMinBudget,
+        feasibleMaxBudget,
+      }
+    }
+    return {
+      payload: {
+        budget_increase_type: 'absolute' as const,
+        budget_increase_value: adjustedTargetBudget - baselineBudget,
+      },
+      adjusted: true,
+      requestedTargetBudget,
+      adjustedTargetBudget,
+      feasibleMinBudget,
+      feasibleMaxBudget,
+    }
+  }
+
   useEffect(() => {
     async function loadAutoConfig() {
       setLoadingConfig(true)
@@ -620,6 +827,7 @@ function App() {
     }
 
     setMarketSearch('')
+    setMarketDropdownOpen(false)
     setMarketOverrides({})
     const marketsForBrand = availableMarkets
     setSelectedMarkets((prev) => {
@@ -665,10 +873,57 @@ function App() {
     }
   }, [aiModeOpen, aiModeBrand, step2BrandOptions, selectedBrand])
 
+  useEffect(() => {
+    if (loadingConfig) return
+    let cancelled = false
+    async function loadStep1Baseline() {
+      try {
+        setStep1BaselineLoading(true)
+        const response = await axios.post<BrandAllocationResponse>(`${API_BASE_URL}/api/brand-allocation`, {
+          budget_increase_type: 'percentage',
+          budget_increase_value: 0,
+        })
+        if (!cancelled) {
+          setStep1BaselineBudget(response.data.summary.baseline_total_budget ?? null)
+        }
+      } catch {
+        if (!cancelled) {
+          setStep1BaselineBudget(null)
+        }
+      } finally {
+        if (!cancelled) {
+          setStep1BaselineLoading(false)
+        }
+      }
+    }
+    void loadStep1Baseline()
+    return () => {
+      cancelled = true
+    }
+  }, [loadingConfig])
+
+  useEffect(() => {
+    if (!brandAllocation) {
+      setStep1EditMode(false)
+      setStep1EditError('')
+      setStep1AllocationDraft({})
+      return
+    }
+    const nextDraft: Record<string, string> = {}
+    for (const row of brandAllocation.allocation_rows) {
+      nextDraft[row.brand] = String(Number((row.allocated_budget / 1_000_000_000).toFixed(4)))
+    }
+    setStep1AllocationDraft(nextDraft)
+    setStep1EditMode(false)
+    setStep1EditError('')
+  }, [brandAllocation])
+
   async function handleRunStep1() {
     setStep1Error('')
+    setStep1EditError('')
     setErrorMessage('')
     setStep2Enabled(false)
+    setStep2SetupCollapsed(false)
     setStep1Collapsed(false)
     setScenarioJobId('')
     setScenarioStatus('idle')
@@ -678,12 +933,14 @@ function App() {
     setScenarioResults(null)
     setSelectedScenarioId('')
     setScenarioPage(1)
+    setScenarioMinRevenuePct('')
+    setScenarioMaxBudgetUtilizedPctFilter('')
 
     try {
       setBrandAllocationLoading(true)
       const response = await axios.post<BrandAllocationResponse>(`${API_BASE_URL}/api/brand-allocation`, {
         budget_increase_type: budgetType,
-        budget_increase_value: budgetValue,
+        budget_increase_value: toBackendBudgetValue(budgetType, budgetValue),
       })
       setBrandAllocation(response.data)
     } catch (error) {
@@ -698,10 +955,155 @@ function App() {
     }
   }
 
+  function handleStep1DraftChange(brand: string, rawValue: string) {
+    setStep1EditError('')
+    setStep1AllocationDraft((prev) => ({ ...prev, [brand]: rawValue }))
+  }
+
+  function resetStep1AllocationDraft() {
+    if (!brandAllocation) return
+    const nextDraft: Record<string, string> = {}
+    for (const row of brandAllocation.allocation_rows) {
+      nextDraft[row.brand] = String(Number((row.allocated_budget / 1_000_000_000).toFixed(4)))
+    }
+    setStep1AllocationDraft(nextDraft)
+  }
+
+  function handleEditStep1Allocations() {
+    resetStep1AllocationDraft()
+    setStep1EditError('')
+    setStep1EditMode(true)
+  }
+
+  function handleCancelStep1Allocations() {
+    resetStep1AllocationDraft()
+    setStep1EditError('')
+    setStep1EditMode(false)
+  }
+
+  useEffect(() => {
+    if (!marketDropdownOpen) return
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (marketDropdownRef.current && !marketDropdownRef.current.contains(target)) {
+        setMarketDropdownOpen(false)
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMarketDropdownOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [marketDropdownOpen])
+
+  function handleSaveStep1Allocations() {
+    if (!brandAllocation) return
+    setStep1EditError('')
+    const parsedByBrand: Record<string, number> = {}
+    for (const row of brandAllocation.allocation_rows) {
+      const raw = step1AllocationDraft[row.brand] ?? ''
+      const valueBn = Number(raw)
+      if (!Number.isFinite(valueBn) || valueBn < 0) {
+        setStep1EditError(`Enter a valid allocated budget in Bn for ${row.brand}.`)
+        return
+      }
+      const nextAllocated = valueBn * 1_000_000_000
+      const baselineBudget = Number(row.baseline_budget ?? 0)
+      const minAllowed = Number(row.min_allowed_budget ?? baselineBudget * 0.75)
+      const maxAllowed = Number(row.max_allowed_budget ?? baselineBudget * 1.25)
+      if (nextAllocated < minAllowed - 1 || nextAllocated > maxAllowed + 1) {
+        setStep1EditError(
+          `${row.brand} must stay within ${formatCurrencyBn(minAllowed)} to ${formatCurrencyBn(maxAllowed)}.`,
+        )
+        return
+      }
+      parsedByBrand[row.brand] = nextAllocated
+    }
+    const editedTotal = Object.values(parsedByBrand).reduce((acc, value) => acc + value, 0)
+    const baselineTotal = Number(brandAllocation.summary.baseline_total_budget)
+    let baselineTotalVolume = 0
+    let estimatedTotalNewVolume = 0
+    let baselineTotalRevenue = 0
+    let estimatedTotalNewRevenue = 0
+    const nextRows = brandAllocation.allocation_rows.map((row) => {
+      const nextAllocated = parsedByBrand[row.brand]
+      const nextShare = editedTotal > 1e-9 ? nextAllocated / editedTotal : 0
+      const baselineBudget = Number(row.baseline_budget ?? 0)
+      const baselineVolume = Number(row.baseline_volume ?? 0)
+      const effectiveElasticity = Number(row.effective_elasticity ?? row.elasticity ?? 0)
+      const avgPrice =
+        Number(row.avg_price_last_3_points ?? 0) > 0
+          ? Number(row.avg_price_last_3_points)
+          : baselineVolume > 1e-9
+            ? Number(row.baseline_revenue ?? 0) / baselineVolume
+            : 0
+      const spendChangeRatio = baselineBudget > 1e-9 ? (nextAllocated - baselineBudget) / baselineBudget : 0
+      const volumeUpliftAbs = Math.max(-baselineVolume, baselineVolume * effectiveElasticity * spendChangeRatio)
+      const estimatedNewVolume = baselineVolume + volumeUpliftAbs
+      const volumeUpliftPct = baselineVolume > 1e-9 ? (volumeUpliftAbs / baselineVolume) * 100 : 0
+      const baselineRevenue = baselineVolume * avgPrice
+      const estimatedNewRevenue = estimatedNewVolume * avgPrice
+      const revenueUpliftAbs = estimatedNewRevenue - baselineRevenue
+      const revenueUpliftPct = baselineRevenue > 1e-9 ? (revenueUpliftAbs / baselineRevenue) * 100 : 0
+
+      baselineTotalVolume += baselineVolume
+      estimatedTotalNewVolume += estimatedNewVolume
+      baselineTotalRevenue += baselineRevenue
+      estimatedTotalNewRevenue += estimatedNewRevenue
+
+      return {
+        ...row,
+        allocated_budget: nextAllocated,
+        share: nextShare,
+        uplift_amount: nextAllocated - baselineBudget,
+        estimated_new_volume: estimatedNewVolume,
+        estimated_volume_uplift_abs: volumeUpliftAbs,
+        estimated_volume_uplift_pct: volumeUpliftPct,
+        baseline_revenue: baselineRevenue,
+        estimated_new_revenue: estimatedNewRevenue,
+        estimated_revenue_uplift_abs: revenueUpliftAbs,
+        estimated_revenue_uplift_pct: revenueUpliftPct,
+      }
+    })
+    const estimatedTotalVolumeUpliftAbs = estimatedTotalNewVolume - baselineTotalVolume
+    const estimatedTotalVolumeUpliftPct =
+      baselineTotalVolume > 1e-9 ? (estimatedTotalVolumeUpliftAbs / baselineTotalVolume) * 100 : 0
+    const estimatedTotalRevenueUpliftAbs = estimatedTotalNewRevenue - baselineTotalRevenue
+    const estimatedTotalRevenueUpliftPct =
+      baselineTotalRevenue > 1e-9 ? (estimatedTotalRevenueUpliftAbs / baselineTotalRevenue) * 100 : 0
+    setBrandAllocation({
+      ...brandAllocation,
+      summary: {
+        ...brandAllocation.summary,
+        requested_target_total_budget: editedTotal,
+        target_total_budget: editedTotal,
+        incremental_budget: editedTotal - baselineTotal,
+        baseline_total_volume: baselineTotalVolume,
+        estimated_total_new_volume: estimatedTotalNewVolume,
+        estimated_total_volume_uplift_abs: estimatedTotalVolumeUpliftAbs,
+        estimated_total_volume_uplift_pct: estimatedTotalVolumeUpliftPct,
+        baseline_total_revenue: baselineTotalRevenue,
+        estimated_total_new_revenue: estimatedTotalNewRevenue,
+        estimated_total_revenue_uplift_abs: estimatedTotalRevenueUpliftAbs,
+        estimated_total_revenue_uplift_pct: estimatedTotalRevenueUpliftPct,
+      },
+      allocation_rows: nextRows,
+    })
+    setStep1EditMode(false)
+  }
+
   useEffect(() => {
     setBrandAllocation(null)
     setStep1Error('')
     setStep2Enabled(false)
+    setStep2SetupCollapsed(false)
     setStep1Collapsed(false)
     setResult(null)
     setScenarioJobId('')
@@ -712,6 +1114,8 @@ function App() {
     setScenarioResults(null)
     setSelectedScenarioId('')
     setScenarioPage(1)
+    setScenarioMinRevenuePct('')
+    setScenarioMaxBudgetUtilizedPctFilter('')
   }, [budgetType, budgetValue])
 
   useEffect(() => {
@@ -723,6 +1127,9 @@ function App() {
     setScenarioResults(null)
     setSelectedScenarioId('')
     setScenarioPage(1)
+    setScenarioMinRevenuePct('')
+    setScenarioMaxBudgetUtilizedPctFilter('')
+    setStep2SetupCollapsed(false)
   }, [selectedBrand, selectedMarketsKey, overridesKey])
 
   useEffect(() => {
@@ -735,11 +1142,15 @@ function App() {
     async function loadConstraintsPreview() {
       try {
         setConstraintsLoading(true)
+        const step2BudgetInput = getStep2BudgetInput()
         const response = await axios.post<OptimizeAutoResponse>(`${API_BASE_URL}/api/constraints-auto`, {
           selected_brand: selectedBrand,
           selected_markets: selectedMarkets,
-          budget_increase_type: budgetType,
-          budget_increase_value: budgetValue,
+          budget_increase_type: step2BudgetInput.budget_increase_type,
+          budget_increase_value: toBackendBudgetValue(
+            step2BudgetInput.budget_increase_type,
+            step2BudgetInput.budget_increase_value,
+          ),
           market_overrides: marketOverrides,
         })
         if (!cancelled) {
@@ -760,7 +1171,7 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [loadingConfig, selectedBrand, selectedMarketsKey, budgetType, budgetValue, overridesKey])
+  }, [loadingConfig, selectedBrand, selectedMarketsKey, budgetType, budgetValue, brandAllocation, overridesKey])
 
   useEffect(() => {
     if (activeMainTab !== 's_curves') {
@@ -936,7 +1347,7 @@ function App() {
       return
     }
     const autoContext = {
-      insights_brand: selectedBrand,
+      insights_brand: aiModeBrand,
       insights_market: activeSCurveState,
       s_curve: sCurvesData
         ? {
@@ -967,11 +1378,15 @@ function App() {
     try {
       setAiModeLoading(true)
       setAiModeError('')
+      const step2BudgetInput = getStep2BudgetInput()
       const requestBody = {
         selected_brand: aiModeBrand,
         selected_markets: payloadMarkets,
-        budget_increase_type: budgetType,
-        budget_increase_value: budgetValue,
+        budget_increase_type: step2BudgetInput.budget_increase_type,
+        budget_increase_value: toBackendBudgetValue(
+          step2BudgetInput.budget_increase_type,
+          step2BudgetInput.budget_increase_value,
+        ),
         market_overrides: filteredOverrides,
         focus_prompt: JSON.stringify(autoContext),
       }
@@ -1012,8 +1427,8 @@ function App() {
       sort_key: scenarioSortKey,
       sort_dir: scenarioSortDir,
     }
-    if (scenarioMinVolumePct.trim() !== '') params.min_volume_uplift_pct = Number(scenarioMinVolumePct)
     if (scenarioMinRevenuePct.trim() !== '') params.min_revenue_uplift_pct = Number(scenarioMinRevenuePct)
+    if (scenarioMaxBudgetUtilizedPctFilter.trim() !== '') params.max_budget_utilized_pct = Number(scenarioMaxBudgetUtilizedPctFilter)
     const response = await axios.get<ScenarioResultsResponse>(`${API_BASE_URL}/api/scenarios/jobs/${jobId}/results`, {
       params,
       validateStatus: (status) => [200, 202, 409, 410].includes(status),
@@ -1047,11 +1462,18 @@ function App() {
 
     try {
       setIsSubmitting(true)
+      setScenarioStartedAt(Date.now())
+      setScenarioElapsedMs(0)
+      const step2BudgetInput = getStep2BudgetInput()
+      const resolvedBudget = resolveScenarioBudgetInput(step2BudgetInput)
+      const scenarioBudgetBand = getStep2ScenarioBudgetBand()
       const response = await axios.post<ScenarioJobCreateResponse>(`${API_BASE_URL}/api/scenarios/jobs`, {
         selected_brand: selectedBrand,
         selected_markets: selectedMarkets,
-        budget_increase_type: budgetType,
-        budget_increase_value: budgetValue,
+        budget_increase_type: resolvedBudget.payload.budget_increase_type,
+        budget_increase_value: resolvedBudget.payload.budget_increase_value,
+        scenario_budget_lower: scenarioBudgetBand?.scenario_budget_lower,
+        scenario_budget_upper: scenarioBudgetBand?.scenario_budget_upper,
         market_overrides: marketOverrides,
         intent_prompt: scenarioIntent,
       })
@@ -1060,7 +1482,11 @@ function App() {
       setScenarioProgress(response.data.progress ?? 0)
       setScenarioMessage(response.data.message ?? 'Scenario generation queued.')
       setScenarioPage(1)
+      setStep2SetupCollapsed(true)
     } catch (error) {
+      setScenarioStartedAt(null)
+      setScenarioElapsedMs(0)
+      setStep2SetupCollapsed(false)
       if (axios.isAxiosError(error)) {
         setScenarioError(error.response?.data?.detail ?? 'Failed to start scenario generation.')
       } else {
@@ -1086,9 +1512,19 @@ function App() {
           if (nextStatus === 'completed') {
             await fetchScenarioResults(scenarioJobId, 1)
           } else if (nextStatus === 'failed' || nextStatus === 'expired') {
+            setScenarioStartedAt(null)
             setScenarioError(response.data.error_reason ?? 'Scenario generation failed.')
           }
-        } catch {
+        } catch (error) {
+          setScenarioStartedAt(null)
+          if (axios.isAxiosError(error) && error.response?.status === 404) {
+            setScenarioStatus('idle')
+            setScenarioJobId('')
+            setScenarioProgress(0)
+            setScenarioMessage('')
+            setScenarioError('Scenario job not found (backend was likely restarted). Please generate scenarios again.')
+            return
+          }
           setScenarioError('Unable to fetch scenario job status.')
         }
       })()
@@ -1098,9 +1534,17 @@ function App() {
   }, [scenarioJobId, scenarioStatus])
 
   useEffect(() => {
+    if (!(scenarioStatus === 'queued' || scenarioStatus === 'running') || !scenarioStartedAt) return
+    const timer = setInterval(() => {
+      setScenarioElapsedMs(Date.now() - scenarioStartedAt)
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [scenarioStatus, scenarioStartedAt])
+
+  useEffect(() => {
     if (!scenarioJobId || scenarioStatus !== 'completed') return
     void fetchScenarioResults(scenarioJobId, scenarioPage)
-  }, [scenarioPage, scenarioPageSize, scenarioSortKey, scenarioSortDir, scenarioMinVolumePct, scenarioMinRevenuePct])
+  }, [scenarioPage, scenarioPageSize, scenarioSortKey, scenarioSortDir, scenarioMinRevenuePct, scenarioMaxBudgetUtilizedPctFilter])
 
   const moneyFormatter = useMemo(
     () =>
@@ -1117,25 +1561,24 @@ function App() {
       }),
     [],
   )
-  const formatScaledBase = (value?: number | null) => {
-    if (value == null || Number.isNaN(value)) return '-'
-    const absValue = Math.abs(value)
-    if (absValue >= 1_000_000_000) {
-      return `${moneyFormatter.format(absValue / 1_000_000_000)} Bn`
-    }
-    return `${moneyFormatter.format(absValue / 1_000_000)} Mn`
-  }
-  const formatCurrency = (value?: number | null) =>
-    value == null || Number.isNaN(value) ? '-' : `INR ${formatScaledBase(value)}`
-  const formatSignedCurrency = (value?: number | null) => {
-    if (value == null || Number.isNaN(value)) return '-'
-    const base = formatScaledBase(value)
-    if (value > 0) return `INR +${base}`
-    if (value < 0) return `INR -${base}`
-    return `INR ${base}`
-  }
   const formatCurrencyBn = (value?: number | null) =>
     value == null || Number.isNaN(value) ? '-' : `INR ${moneyFormatter.format(value / 1_000_000_000)} Bn`
+  const formatCurrencyMn = (value?: number | null) =>
+    value == null || Number.isNaN(value) ? '-' : `INR ${moneyFormatter.format(value / 1_000_000)} Mn`
+  const formatSignedCurrencyBn = (value?: number | null) => {
+    if (value == null || Number.isNaN(value)) return '-'
+    const base = moneyFormatter.format(Math.abs(value) / 1_000_000_000)
+    if (value > 0) return `INR +${base} Bn`
+    if (value < 0) return `INR -${base} Bn`
+    return `INR ${base} Bn`
+  }
+  const formatSignedCurrencyMn = (value?: number | null) => {
+    if (value == null || Number.isNaN(value)) return '-'
+    const base = moneyFormatter.format(Math.abs(value))
+    if (value > 0) return `INR +${base} Mn`
+    if (value < 0) return `INR -${base} Mn`
+    return `INR ${base} Mn`
+  }
   const formatRawNumber = (value?: number | null) =>
     value == null || Number.isNaN(value) ? '-' : numberFormatter.format(value)
   const formatPct = (value?: number | null, digits = 2) =>
@@ -1144,19 +1587,6 @@ function App() {
     value == null || Number.isNaN(value) ? '-' : `${value >= 0 ? '+' : ''}${value.toFixed(digits)}%`
   const formatSignedNumber = (value?: number | null, digits = 2) =>
     value == null || Number.isNaN(value) ? '-' : `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`
-  const formatUpliftPctFromBudget = (uplift?: number | null, baseline?: number | null, digits = 2) => {
-    if (
-      uplift == null ||
-      baseline == null ||
-      Number.isNaN(uplift) ||
-      Number.isNaN(baseline) ||
-      Math.abs(baseline) < 1e-9
-    ) {
-      return '-'
-    }
-    const pct = (uplift / baseline) * 100
-    return `${pct >= 0 ? '+' : ''}${pct.toFixed(digits)}%`
-  }
   const constraintRows = useMemo(() => {
     const rows = result?.allocation_rows ?? constraintsPreview?.allocation_rows ?? []
     return [...rows].sort((a, b) => a.market.localeCompare(b.market))
@@ -1185,23 +1615,94 @@ function App() {
     if (!brandAllocation) return false
     return Math.abs(brandAllocation.summary.incremental_budget) > 1e-6
   }, [brandAllocation])
-  const hasStep1RevenueEffect = useMemo(() => {
-    if (!brandAllocation) return false
-    return (brandAllocation.summary.baseline_total_revenue ?? 0) > 0
+  const step1SplitRows = useMemo(() => {
+    if (!brandAllocation) return []
+    const baselineTotal = Number(brandAllocation.summary.baseline_total_budget ?? 0)
+    const optimizedTotal = Number(brandAllocation.summary.target_total_budget ?? 0)
+    return brandAllocation.allocation_rows.map((row) => {
+      const baselineBudget = Number(row.baseline_budget ?? 0)
+      const allocatedBudget = Number(row.allocated_budget ?? 0)
+      const baselineShare = baselineTotal > 1e-9 ? (baselineBudget / baselineTotal) * 100 : 0
+      const optimizedShare = optimizedTotal > 1e-9 ? (allocatedBudget / optimizedTotal) * 100 : 0
+      return {
+        brand: row.brand,
+        baselineBudget,
+        allocatedBudget,
+        baselineShare,
+        optimizedShare,
+      }
+    })
   }, [brandAllocation])
+  const step1EditedTotalBudget = useMemo(() => {
+    if (!brandAllocation) return null
+    if (!step1EditMode) return Number(brandAllocation.summary.target_total_budget)
+    return brandAllocation.allocation_rows.reduce((acc, row) => {
+      const draftBn = Number(step1AllocationDraft[row.brand])
+      if (Number.isFinite(draftBn) && draftBn >= 0) return acc + draftBn * 1_000_000_000
+      return acc + Number(row.allocated_budget ?? 0)
+    }, 0)
+  }, [brandAllocation, step1EditMode, step1AllocationDraft])
   const selectedScenario = useMemo(() => {
     if (!scenarioResults || !selectedScenarioId) return null
     return scenarioResults.items.find((item) => item.scenario_id === selectedScenarioId) ?? null
   }, [scenarioResults, selectedScenarioId])
-  const scenarioBarMaxAbs = useMemo(() => {
-    const items = scenarioResults?.items ?? []
-    if (items.length === 0) return 1
-    return Math.max(1, ...items.flatMap((item) => [Math.abs(item.volume_uplift_pct), Math.abs(item.revenue_uplift_pct)]))
-  }, [scenarioResults])
-  const scenarioChartWidth = useMemo(() => {
-    const items = scenarioResults?.items ?? []
-    return Math.max(840, items.length * 120 + 140)
-  }, [scenarioResults])
+  const selectedScenarioOriginalSpendTotal = useMemo(() => {
+    if (!selectedScenario) return 0
+    return selectedScenario.markets.reduce((acc, row) => acc + Number(row.old_total_spend ?? 0), 0)
+  }, [selectedScenario])
+  const selectedScenarioBudgetFlow = useMemo(() => {
+    if (!selectedScenario) {
+      return {
+        increased: [] as ScenarioMarketFlowRow[],
+        decreased: [] as ScenarioMarketFlowRow[],
+        maxShareDeltaPct: 0.1,
+        maxSpendDeltaMn: 1,
+      }
+    }
+    const totalNewSpend = Number(selectedScenario.total_new_spend ?? 0)
+    const rows = selectedScenario.markets.map((row) => {
+      const oldSpend = Number(row.old_total_spend ?? 0)
+      const oldBudgetSharePct =
+        selectedScenarioOriginalSpendTotal > 1e-12
+          ? (oldSpend / selectedScenarioOriginalSpendTotal) * 100
+          : 0
+      const newBudgetSharePct = Number(row.new_budget_share ?? 0) * 100
+      const budgetShareChangePct = newBudgetSharePct - oldBudgetSharePct
+      const newSpend =
+        row.new_total_spend != null && Number.isFinite(Number(row.new_total_spend))
+          ? Number(row.new_total_spend)
+          : totalNewSpend * Number(row.new_budget_share ?? 0)
+      const spendDeltaMn = (newSpend - oldSpend) / 1_000_000
+      const oldTvPct = Number(row.fy25_tv_share ?? row.tv_split ?? 0) * 100
+      const newTvPct = Number(row.tv_split ?? 0) * 100
+      const oldDigitalPct = Number(row.fy25_digital_share ?? row.digital_split ?? 0) * 100
+      const newDigitalPct = Number(row.digital_split ?? 0) * 100
+      return {
+        market: row.market,
+        old_budget_share_pct: oldBudgetSharePct,
+        new_budget_share_pct: newBudgetSharePct,
+        budget_share_change_pct: budgetShareChangePct,
+        spend_delta_mn: spendDeltaMn,
+        old_tv_split_pct: oldTvPct,
+        new_tv_split_pct: newTvPct,
+        tv_split_change_pct: newTvPct - oldTvPct,
+        old_digital_split_pct: oldDigitalPct,
+        new_digital_split_pct: newDigitalPct,
+        digital_split_change_pct: newDigitalPct - oldDigitalPct,
+      }
+    })
+    const sorter: (a: ScenarioMarketFlowRow, b: ScenarioMarketFlowRow) => number =
+      scenarioFlowSortKey === 'spend'
+        ? (a, b) => Math.abs(b.spend_delta_mn) - Math.abs(a.spend_delta_mn)
+        : (a, b) =>
+            Math.abs(b.budget_share_change_pct) - Math.abs(a.budget_share_change_pct)
+    const increased = rows.filter((row) => row.budget_share_change_pct > 0.001).sort(sorter)
+    const decreased = rows.filter((row) => row.budget_share_change_pct < -0.001).sort(sorter)
+    const maxShareDeltaPct = Math.max(0.1, ...rows.map((row) => Math.abs(row.budget_share_change_pct)))
+    const maxSpendDeltaMn = Math.max(1, ...rows.map((row) => Math.abs(row.spend_delta_mn)))
+    return { increased, decreased, maxShareDeltaPct, maxSpendDeltaMn }
+  }, [selectedScenario, selectedScenarioOriginalSpendTotal, scenarioFlowSortKey])
+  const scenarioChartWidth = 1200
   const scenarioPageRange = useMemo(() => {
     if (!scenarioResults || scenarioResults.items.length === 0) {
       return { start: 0, end: 0 }
@@ -1210,6 +1711,60 @@ function App() {
     const end = start + scenarioResults.items.length - 1
     return { start, end }
   }, [scenarioResults])
+  const scenarioBudgetAxisMax = useMemo(() => {
+    const items = scenarioResults?.items ?? []
+    if (items.length === 0) return 100
+    const targetBudget = Number(scenarioResults?.summary.target_budget ?? 0)
+    if (!Number.isFinite(targetBudget) || targetBudget <= 0) return 100
+    const maxPct = Math.max(...items.map((item) => (Number(item.total_new_spend ?? 0) / targetBudget) * 100))
+    const rounded = Math.ceil(maxPct / 10) * 10
+    return Math.max(100, rounded)
+  }, [scenarioResults])
+  const scenarioMaxBudgetUtilizedPct = useMemo(() => {
+    const items = scenarioResults?.items ?? []
+    if (items.length === 0) return 0
+    const targetBudget = Number(scenarioResults?.summary.target_budget ?? 0)
+    if (!Number.isFinite(targetBudget) || targetBudget <= 0) return 0
+    return Math.max(...items.map((item) => (Number(item.total_new_spend ?? 0) / targetBudget) * 100))
+  }, [scenarioResults])
+  const scenarioGenerationActive = scenarioStatus === 'queued' || scenarioStatus === 'running'
+  const normalizedScenarioProgress = Math.max(0, Math.min(100, scenarioProgress))
+  const activeScenarioStageIndex = useMemo(() => {
+    if (scenarioStatus === 'queued') return 0
+    const stageIndex = SCENARIO_PROGRESS_STAGES.findIndex(
+      (stage) => normalizedScenarioProgress >= stage.start && normalizedScenarioProgress < stage.end,
+    )
+    return stageIndex >= 0 ? stageIndex : SCENARIO_PROGRESS_STAGES.length - 1
+  }, [scenarioStatus, normalizedScenarioProgress])
+  const activeScenarioStage = SCENARIO_PROGRESS_STAGES[activeScenarioStageIndex] ?? SCENARIO_PROGRESS_STAGES[0]
+  const scenarioElapsedLabel = useMemo(() => {
+    if (!scenarioStartedAt) return '0s'
+    const totalSeconds = Math.max(0, Math.floor(scenarioElapsedMs / 1000))
+    if (totalSeconds < 60) return `${totalSeconds}s`
+    const minutes = Math.floor(totalSeconds / 60)
+    const seconds = totalSeconds % 60
+    return `${minutes}m ${seconds}s`
+  }, [scenarioElapsedMs, scenarioStartedAt])
+  const scenarioActivityBars = useMemo(
+    () => [
+      {
+        key: 'intent',
+        label: 'Intent translation',
+        pct: Math.min(100, normalizedScenarioProgress * 2.4),
+      },
+      {
+        key: 'sampling',
+        label: 'Scenario sampling',
+        pct: Math.max(6, Math.min(100, (normalizedScenarioProgress - 18) * 1.7)),
+      },
+      {
+        key: 'ranking',
+        label: 'Constraint checks + ranking',
+        pct: Math.max(4, Math.min(100, (normalizedScenarioProgress - 56) * 2.2)),
+      },
+    ],
+    [normalizedScenarioProgress],
+  )
 
   useEffect(() => {
     const items = scenarioResults?.items ?? []
@@ -1221,6 +1776,10 @@ function App() {
       setSelectedScenarioId('')
     }
   }, [scenarioResults, selectedScenarioId])
+
+  useEffect(() => {
+    setScenarioMarketModal(null)
+  }, [selectedScenarioId])
 
   function renderConstraintsPanel() {
     if (constraintsLoading && !selectedConstraintRow && !activeConstraintSummary) {
@@ -1399,49 +1958,59 @@ function App() {
               disabled={loadingConfig}
             >
               <option value="percentage">Percentage (%)</option>
-              <option value="absolute">Absolute Amount (INR)</option>
+              <option value="absolute">Absolute Amount (INR Mn)</option>
             </select>
           </div>
           <div className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
             <label className="text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor={`${idPrefix}-budget-value`}>
-              {budgetType === 'percentage' ? 'Budget Increase %' : 'Absolute Increase Value'}
+              {budgetType === 'percentage' ? 'Budget Increase %' : 'Absolute Increase Value (Mn)'}
             </label>
             <input
               id={`${idPrefix}-budget-value`}
               type="number"
-              step={budgetType === 'percentage' ? '0.001' : '1000'}
+              step={budgetType === 'percentage' ? '0.001' : '1'}
               value={budgetValue}
               onChange={(event) => setBudgetValue(Number(event.target.value))}
               inputMode="decimal"
               className="no-spinner mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
               disabled={loadingConfig}
             />
+            {budgetType === 'absolute' ? (
+              <p className="mt-1 text-[11px] text-slate-500">1 = INR 1 Mn</p>
+            ) : null}
           </div>
+        </div>
+        <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Initial Total Budget (Reference)</p>
+          <p className="mt-1 text-sm font-semibold text-dark-text">
+            {step1BaselineLoading ? 'Loading...' : formatCurrencyBn(step1BaselineBudget)}
+          </p>
         </div>
       </div>
     )
   }
 
   function renderSetupForm(idPrefix: string) {
+    const step2InputPreview = getStep2BudgetInput()
     return (
-      <form className="space-y-3" onSubmit={handleGenerateScenarios}>
-        <div className="grid gap-2 md:grid-cols-3">
-          <div className="rounded-lg border border-primary/25 bg-primary/5 px-3 py-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-primary">1. Select Brand</p>
+      <form className="space-y-2.5" onSubmit={handleGenerateScenarios}>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="rounded-full border border-primary/25 bg-primary/5 px-2.5 py-1">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-primary">1. Brand</p>
           </div>
-          <div className="rounded-lg border border-primary/25 bg-primary/5 px-3 py-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-primary">2. Add AI Intent</p>
+          <div className="rounded-full border border-primary/25 bg-primary/5 px-2.5 py-1">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-primary">2. Intent + Markets</p>
           </div>
-          <div className="rounded-lg border border-primary/25 bg-primary/5 px-3 py-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-primary">3. Edit Constraints</p>
+          <div className="rounded-full border border-primary/25 bg-primary/5 px-2.5 py-1">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-primary">3. Constraints</p>
           </div>
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Step 1</p>
-          <div className="mt-2 grid gap-3 lg:grid-cols-[minmax(0,1fr)_260px]">
-            <div>
-              <label className="text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor={`${idPrefix}-brand`}>
+          <div className="grid gap-3 xl:grid-cols-[300px_minmax(0,1fr)]">
+            <div className="rounded-lg border border-slate-200 bg-white p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Step 1</p>
+              <label className="mt-2 block text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor={`${idPrefix}-brand`}>
                 Brand
               </label>
               <select
@@ -1457,90 +2026,110 @@ function App() {
                   </option>
                 ))}
               </select>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Budget From Step 1</p>
-              <p className="mt-1 text-base font-semibold text-dark-text">
-                {selectedBrandAllocation ? formatCurrency(selectedBrandAllocation.allocated_budget) : '-'}
-              </p>
-              <p className="mt-0.5 text-xs text-slate-500">Selected markets: {selectedMarkets.length}</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Step 2</p>
-          <div className="mt-2 grid gap-3 xl:grid-cols-2">
-            <div>
-              <label
-                className="block text-xs font-semibold uppercase tracking-wide text-slate-500"
-                htmlFor={`${idPrefix}-scenario-intent`}
-              >
-                AI Intent
-              </label>
-              <textarea
-                id={`${idPrefix}-scenario-intent`}
-                rows={3}
-                value={scenarioIntent}
-                onChange={(event) => setScenarioIntent(event.target.value)}
-                placeholder="Example: Protect revenue while keeping volume growth positive."
-                className="mt-1 w-full resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
-              />
-            </div>
-
-            <div>
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Market Selection</p>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedMarkets(availableMarkets)}
-                    className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700"
-                  >
-                    Select All
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedMarkets([])}
-                    className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-700"
-                  >
-                    Clear
-                  </button>
-                </div>
+              <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Budget From Step 1</p>
+                <p className="mt-1 text-sm font-semibold text-dark-text">
+                  {selectedBrandAllocation ? formatCurrencyBn(selectedBrandAllocation.allocated_budget) : '-'}
+                </p>
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Applied:{' '}
+                  {step2InputPreview.budget_increase_type === 'absolute'
+                    ? formatSignedCurrencyMn(step2InputPreview.budget_increase_value)
+                    : formatSignedPct(step2InputPreview.budget_increase_value)}
+                </p>
               </div>
+            </div>
 
-              <input
-                type="text"
-                value={marketSearch}
-                onChange={(event) => setMarketSearch(event.target.value)}
-                placeholder="Search market..."
-                className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
-              />
-
-              <div className="mt-2 grid max-h-40 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
-                {filteredMarkets.map((market) => (
+            <div className="rounded-lg border border-slate-200 bg-white p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Step 2</p>
+              <div className="mt-2 grid gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
+                <div>
                   <label
-                    key={market}
-                    className={`flex cursor-pointer items-center justify-between rounded-lg border px-3 py-1.5 text-sm ${
-                      selectedMarkets.includes(market)
-                        ? 'border-primary/30 bg-primary/10 text-primary'
-                        : 'border-slate-200 bg-white text-slate-700'
-                    }`}
+                    className="block text-xs font-semibold uppercase tracking-wide text-slate-500"
+                    htmlFor={`${idPrefix}-scenario-intent`}
                   >
-                    <span className="truncate pr-2">{market}</span>
-                    <input
-                      type="checkbox"
-                      checked={selectedMarkets.includes(market)}
-                      onChange={() => toggleMarket(market)}
-                      className="h-4 w-4 rounded border-slate-300 text-primary focus:ring-blue-200"
-                    />
+                    AI Intent
                   </label>
-                ))}
-                {filteredMarkets.length === 0 ? (
-                  <div className="rounded-lg border border-slate-200 bg-white px-3 py-3 text-center text-sm text-slate-500 sm:col-span-2">
-                    {selectedBrand ? 'No markets mapped for this brand.' : 'No markets found.'}
+                  <textarea
+                    id={`${idPrefix}-scenario-intent`}
+                    rows={2}
+                    value={scenarioIntent}
+                    onChange={(event) => setScenarioIntent(event.target.value)}
+                    placeholder="Example: Protect revenue while keeping volume growth positive."
+                    className="mt-1 w-full resize-none rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
+                  />
+                </div>
+
+                <div ref={marketDropdownRef} className="relative">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Market Selection</p>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedMarkets(availableMarkets)}
+                        className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700"
+                      >
+                        Select All
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedMarkets([])}
+                        className="rounded-lg border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700"
+                      >
+                        Clear
+                      </button>
+                    </div>
                   </div>
-                ) : null}
+                  <button
+                    type="button"
+                    onClick={() => setMarketDropdownOpen((prev) => !prev)}
+                    className="mt-1 flex w-full items-center justify-between rounded-lg border border-slate-300 bg-white px-3 py-2 text-left text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
+                  >
+                    <span className="truncate">
+                      {selectedMarkets.length > 0
+                        ? `${selectedMarkets.length} markets selected`
+                        : 'Select markets'}
+                    </span>
+                    <ChevronDown className={`h-4 w-4 text-slate-500 transition-transform ${marketDropdownOpen ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {marketDropdownOpen ? (
+                    <div className="absolute z-20 mt-1 w-full rounded-lg border border-slate-200 bg-white p-2 shadow-lg">
+                      <input
+                        type="text"
+                        value={marketSearch}
+                        onChange={(event) => setMarketSearch(event.target.value)}
+                        placeholder="Search market..."
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
+                      />
+                      <div className="mt-2 max-h-44 overflow-y-auto space-y-1 pr-1">
+                        {filteredMarkets.map((market) => (
+                          <label
+                            key={`market-dropdown-${market}`}
+                            className={`flex cursor-pointer items-center justify-between rounded-md border px-2.5 py-1.5 text-sm ${
+                              selectedMarkets.includes(market)
+                                ? 'border-primary/30 bg-primary/10 text-primary'
+                                : 'border-slate-200 bg-white text-slate-700'
+                            }`}
+                          >
+                            <span className="truncate pr-2">{market}</span>
+                            <input
+                              type="checkbox"
+                              checked={selectedMarkets.includes(market)}
+                              onChange={() => toggleMarket(market)}
+                              className="h-4 w-4 rounded border-slate-300 text-primary focus:ring-blue-200"
+                            />
+                          </label>
+                        ))}
+                        {filteredMarkets.length === 0 ? (
+                          <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs text-slate-500">
+                            {selectedBrand ? 'No markets found.' : 'No markets mapped for this brand.'}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
               </div>
             </div>
           </div>
@@ -1572,9 +2161,13 @@ function App() {
               setScenarioStatus('idle')
               setScenarioProgress(0)
               setScenarioMessage('')
+              setScenarioStartedAt(null)
+              setScenarioElapsedMs(0)
               setScenarioResults(null)
               setSelectedScenarioId('')
               setScenarioError('')
+              setScenarioMinRevenuePct('')
+              setScenarioMaxBudgetUtilizedPctFilter('')
             }}
             className="rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700"
           >
@@ -2174,54 +2767,34 @@ function App() {
       year: 'numeric',
     })
 
-    const renderStructuredActionList = (
+    const renderSummaryActionList = (
       title: string,
       tone: 'positive' | 'risk',
-      rows: AIInsightsStructuredAction[],
+      rows: Array<{ state: string; channel: string; reason: string; action: string }>,
     ) => {
       const borderClass = tone === 'positive' ? 'border-success/30' : 'border-danger/30'
       const titleClass = tone === 'positive' ? 'text-success' : 'text-danger'
-      const accentClass = tone === 'positive' ? 'bg-success' : 'bg-danger'
-      const sectionHelpText =
-        tone === 'positive'
-          ? 'States where incremental spend is expected to convert efficiently.'
-          : 'States where current spend should be protected, corrected, or rebalanced.'
-      const marketCardByState = new Map(
-        (aiModeData?.market_cards ?? []).map((item) => [item.market.toLowerCase(), item]),
-      )
-
-      const buildBusinessWhy = (item: AIInsightsStructuredAction) => {
-        const card = marketCardByState.get(item.state.toLowerCase())
-        if (!card) return item.why
-        const yoy = formatSignedPct(card.yoy_growth_pct)
-        const headroom = formatPct(card.headroom_pct)
-        const tvZone = card.tv_zone ?? 'balanced'
-        const digitalZone = card.digital_zone ?? 'balanced'
-        if (tone === 'positive') {
-          return `YoY momentum at ${yoy} with ${headroom} headroom. TV is ${tvZone} and Digital is ${digitalZone}, supporting controlled scale-up.`
-        }
-        return `Current momentum at ${yoy} with ${headroom} headroom. TV is ${tvZone} and Digital is ${digitalZone}, so spend protection or channel rebalance is recommended.`
-      }
-
+      const badgeClass = tone === 'positive' ? 'bg-success/10 text-success border-success/20' : 'bg-danger/10 text-danger border-danger/20'
       return (
         <div className={`rounded-xl border bg-white p-4 shadow-sm ${borderClass}`}>
           <p className={`text-xs font-semibold uppercase tracking-wide ${titleClass}`}>{title}</p>
-          <p className="mt-1 text-xs text-slate-500">{sectionHelpText}</p>
           <div className="mt-3 space-y-2.5">
             {rows.length === 0 ? (
               <p className="text-sm text-slate-500">No specific states identified.</p>
             ) : (
               rows.map((row, index) => (
                 <div key={`${title}-${row.state}-${index}`} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                  <div className="flex items-center gap-2">
-                    <span className={`h-2 w-2 rounded-full ${accentClass}`} />
+                  <div className="flex items-center justify-between gap-2">
                     <p className="text-sm font-semibold text-dark-text">{row.state}</p>
+                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${badgeClass}`}>
+                      {row.channel}
+                    </span>
                   </div>
                   <p className="mt-1 text-xs text-slate-600">
-                    <span className="font-semibold text-slate-700">Business rationale:</span> {buildBusinessWhy(row)}
+                    <span className="font-semibold text-slate-700">Why:</span> {row.reason}
                   </p>
                   <p className="mt-1 text-xs text-slate-600">
-                    <span className="font-semibold text-slate-700">Recommended move:</span> {row.action}
+                    <span className="font-semibold text-slate-700">Action:</span> {row.action}
                   </p>
                 </div>
               ))
@@ -2230,6 +2803,74 @@ function App() {
         </div>
       )
     }
+
+    const renderMediaInvestmentFramework = () => {
+      const items = aiModeData?.market_cards ?? []
+      if (items.length === 0) return null
+      const groups = {
+        increase_media_investments: items.filter((x) => x.investment_quadrant === 'increase_media_investments'),
+        maintain_high_salience: items.filter((x) => x.investment_quadrant === 'maintain_high_salience'),
+        maintain_selective: items.filter((x) => x.investment_quadrant === 'maintain_selective'),
+        scale_back: items.filter((x) => x.investment_quadrant === 'scale_back'),
+      }
+      const salienceCutoff = aiModeData?.investment_framework?.salience_threshold_pct
+      const responsivenessCutoff = aiModeData?.investment_framework?.responsiveness_threshold_pct
+      const renderGroup = (
+        title: string,
+        tone: 'green' | 'amber' | 'red',
+        rows: AIInsightsMarketCard[],
+      ) => {
+        const theme =
+          tone === 'green'
+            ? 'border-success/30 bg-success/5 text-success'
+            : tone === 'red'
+              ? 'border-danger/30 bg-danger/5 text-danger'
+              : 'border-amber-300 bg-amber-50 text-amber-700'
+        return (
+          <div className={`rounded-xl border p-4 ${theme}`}>
+            <p className="text-xs font-semibold uppercase tracking-wide">{title}</p>
+            <div className="mt-2 space-y-2">
+              {rows.length === 0 ? (
+                <p className="text-xs text-slate-600">No states in this quadrant.</p>
+              ) : (
+                rows.map((row) => (
+                  <div key={`quad-${title}-${row.market}`} className="rounded-lg border border-slate-200 bg-white p-2.5 text-slate-700">
+                    <p className="text-sm font-semibold text-dark-text">{row.market}</p>
+                    <p className="mt-1 text-xs">
+                      Salience {formatPct(row.category_salience_pct, 1)} | Responsiveness {formatPct(row.media_responsiveness_pct, 1)} | {row.leader_position || '-'}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        )
+      }
+      return (
+        <div className="rounded-xl border border-slate-200 bg-white p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-primary">Media Investment Framework</p>
+          <p className="mt-1 text-xs text-slate-500">
+            Salience cutoff: {formatPct(salienceCutoff, 1)} | Responsiveness cutoff: {formatPct(responsivenessCutoff, 1)}
+          </p>
+          <div className="mt-3 grid gap-3 xl:grid-cols-2">
+            {renderGroup('Increase Media Investments', 'green', groups.increase_media_investments)}
+            {renderGroup('Maintain (High Salience)', 'amber', groups.maintain_high_salience)}
+            {renderGroup('Maintain (Selective)', 'amber', groups.maintain_selective)}
+            {renderGroup('Scale Back', 'red', groups.scale_back)}
+          </div>
+        </div>
+      )
+    }
+
+    const userFacingNotes = (aiModeData?.notes ?? [])
+      .map((note) => {
+        const low = note.toLowerCase()
+        if (low.includes('429') || low.includes('rate limit')) return 'AI service is rate-limited right now. Deterministic report logic has been used.'
+        if (low.includes('api key missing')) return 'AI key not configured. Deterministic report logic has been used.'
+        if (low.includes('fallback') || low.includes('deterministic')) return 'Fallback report logic was applied for this run.'
+        return note
+      })
+      .filter((note, index, arr) => arr.indexOf(note) === index)
 
     return (
       <div className="fixed inset-0 z-50">
@@ -2327,7 +2968,7 @@ function App() {
                     </p>
                   </div>
 
-                  <div className="grid gap-3 xl:grid-cols-4">
+                  <div className="grid gap-3 xl:grid-cols-5">
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Brand</p>
                       <p className="mt-1 text-base font-semibold text-dark-text">{aiModeData.selection.brand}</p>
@@ -2337,14 +2978,58 @@ function App() {
                       <p className="mt-1 text-base font-semibold text-dark-text">{aiModeData.selection.markets_count}</p>
                     </div>
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Cluster Split</p>
-                      <p className="mt-1 text-sm font-semibold text-dark-text">
-                        L:{aiModeData.summary.leaders_count} | C:{aiModeData.summary.core_count} | R:{aiModeData.summary.recovery_count}
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Positive YoY States</p>
+                      <p className="mt-1 text-base font-semibold text-dark-text">
+                        {aiModeData.portfolio_metrics?.positive_yoy_states ?? '-'}
+                      </p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Average YoY</p>
+                      <p className={`mt-1 text-base font-semibold ${(aiModeData.portfolio_metrics?.avg_yoy_growth_pct ?? 0) >= 0 ? 'text-success' : 'text-danger'}`}>
+                        {formatSignedPct(aiModeData.portfolio_metrics?.avg_yoy_growth_pct, 2)}
                       </p>
                     </div>
                     <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Engine</p>
                       <p className="mt-1 text-sm font-semibold uppercase text-dark-text">{aiModeData.summary.provider}</p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-primary">Signals Used For Trinity Report</p>
+                    <div className="mt-3 grid gap-3 xl:grid-cols-3">
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">YoY Signal</p>
+                        <p className="mt-1 text-sm text-slate-700">
+                          {aiModeData.signal_snapshot?.yoy?.latest_fiscal_year || '-'} |{' '}
+                          {formatSignedPct(aiModeData.signal_snapshot?.yoy?.latest_yoy_growth_pct, 2)}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Volume: {formatRawNumber(aiModeData.signal_snapshot?.yoy?.latest_volume_mn)} Mn
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">S-Curve Signal</p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          TV uplift band: {formatSignedPct(aiModeData.signal_snapshot?.s_curve?.tv_first_uplift_pct, 1)} to {formatSignedPct(aiModeData.signal_snapshot?.s_curve?.tv_last_uplift_pct, 1)}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          Digital uplift band: {formatSignedPct(aiModeData.signal_snapshot?.s_curve?.dg_first_uplift_pct, 1)} to {formatSignedPct(aiModeData.signal_snapshot?.s_curve?.dg_last_uplift_pct, 1)}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Top Contribution Drivers</p>
+                        <div className="mt-1 space-y-1">
+                          {(aiModeData.signal_snapshot?.contribution_top ?? []).slice(0, 3).map((item, idx) => (
+                            <p key={`signal-driver-${idx}`} className="text-xs text-slate-700">
+                              {item.variable}: {formatSignedPct(item.share_pct, 1)}
+                            </p>
+                          ))}
+                          {(aiModeData.signal_snapshot?.contribution_top ?? []).length === 0 ? (
+                            <p className="text-xs text-slate-500">No contribution context passed for this run.</p>
+                          ) : null}
+                        </div>
+                      </div>
                     </div>
                   </div>
 
@@ -2407,6 +3092,8 @@ function App() {
                         </div>
                       </div>
 
+                      {renderMediaInvestmentFramework()}
+
                       <div className="grid gap-3 xl:grid-cols-2">
                         <div className="rounded-xl border border-slate-200 bg-white p-4">
                           <p className="text-xs font-semibold uppercase tracking-wide text-primary">TV Effectiveness</p>
@@ -2441,8 +3128,8 @@ function App() {
                       </div>
 
                       <div className="grid gap-3 xl:grid-cols-2">
-                        {renderStructuredActionList('Where To Increase', 'positive', structured.where_to_increase)}
-                        {renderStructuredActionList('Where To Protect / Rebalance', 'risk', structured.where_to_protect_reduce)}
+                        {renderSummaryActionList('Where To Increase', 'positive', summaryJson?.increase_markets ?? [])}
+                        {renderSummaryActionList('Where To Protect / Rebalance', 'risk', summaryJson?.decrease_markets ?? [])}
                       </div>
 
                     </>
@@ -2461,11 +3148,13 @@ function App() {
                           <tr>
                             <th className="px-3 py-2 text-left">State</th>
                             <th className="px-3 py-2 text-right">YoY %</th>
-                            <th className="px-3 py-2 text-right">Headroom %</th>
+                            <th className="px-3 py-2 text-right">Salience %</th>
+                            <th className="px-3 py-2 text-right">Brand Share %</th>
+                            <th className="px-3 py-2 text-left">Leader Position</th>
                             <th className="px-3 py-2 text-right">TV Eff %</th>
                             <th className="px-3 py-2 text-right">Digital Eff %</th>
-                            <th className="px-3 py-2 text-left">TV Zone</th>
-                            <th className="px-3 py-2 text-left">Digital Zone</th>
+                            <th className="px-3 py-2 text-right">Responsiveness %</th>
+                            <th className="px-3 py-2 text-left">Quadrant</th>
                             <th className="px-3 py-2 text-left">Action</th>
                           </tr>
                         </thead>
@@ -2476,11 +3165,13 @@ function App() {
                               <td className={`px-3 py-2.5 text-right font-semibold ${row.yoy_growth_pct >= 0 ? 'text-success' : 'text-danger'}`}>
                                 {formatSignedPct(row.yoy_growth_pct)}
                               </td>
-                              <td className="px-3 py-2.5 text-right">{formatPct(row.headroom_pct)}</td>
+                              <td className="px-3 py-2.5 text-right">{formatPct(row.category_salience_pct)}</td>
+                              <td className="px-3 py-2.5 text-right">{formatPct(row.brand_market_share_pct)}</td>
+                              <td className="px-3 py-2.5 text-xs">{row.leader_position ?? '-'}</td>
                               <td className="px-3 py-2.5 text-right">{formatPct(row.tv_effectiveness_pct)}</td>
                               <td className="px-3 py-2.5 text-right">{formatPct(row.digital_effectiveness_pct)}</td>
-                              <td className="px-3 py-2.5 text-xs">{row.tv_zone ?? '-'}</td>
-                              <td className="px-3 py-2.5 text-xs">{row.digital_zone ?? '-'}</td>
+                              <td className="px-3 py-2.5 text-right">{formatPct(row.media_responsiveness_pct)}</td>
+                              <td className="px-3 py-2.5 text-xs">{row.investment_quadrant?.replaceAll('_', ' ') ?? '-'}</td>
                               <td className="px-3 py-2.5 text-xs text-slate-700">{row.recommendation_action}</td>
                             </tr>
                           ))}
@@ -2489,14 +3180,156 @@ function App() {
                     </div>
                   </div>
 
-                  {aiModeData.notes.length > 0 ? (
+                  {userFacingNotes.length > 0 ? (
                     <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                      {aiModeData.notes.join(' ')}
+                      {userFacingNotes.join(' ')}
                     </div>
                   ) : null}
                 </div>
               ) : null}
             </section>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  function renderStep1SplitPieCard(mode: 'baseline' | 'optimized') {
+    if (!brandAllocation || step1SplitRows.length === 0) return null
+    const title = mode === 'baseline' ? 'Previous Brand Split' : 'Optimized Brand Split'
+    const totalBudget =
+      mode === 'baseline'
+        ? Number(brandAllocation.summary.baseline_total_budget ?? 0)
+        : Number(brandAllocation.summary.target_total_budget ?? 0)
+    const pieces = step1SplitRows.map((row) => ({
+      brand: row.brand,
+      share: mode === 'baseline' ? row.baselineShare : row.optimizedShare,
+      budget: mode === 'baseline' ? row.baselineBudget : row.allocatedBudget,
+    }))
+    let cursor = 0
+    const stops: string[] = []
+    for (const piece of pieces) {
+      const pieceColor = getShareGreenColor(piece.share)
+      const next = Math.min(100, cursor + Math.max(0, piece.share))
+      stops.push(`${pieceColor} ${cursor.toFixed(3)}% ${next.toFixed(3)}%`)
+      cursor = next
+    }
+    if (cursor < 100) {
+      stops.push(`#E2E8F0 ${cursor.toFixed(3)}% 100%`)
+    }
+    const pieBackground = `conic-gradient(${stops.join(', ')})`
+
+    return (
+      <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</p>
+        <div className="mt-3 grid gap-4 lg:grid-cols-[220px_1fr]">
+          <div className="flex items-center justify-center">
+            <div className="relative h-52 w-52 rounded-full border border-slate-200" style={{ background: pieBackground }}>
+              <div className="absolute inset-[28%] flex items-center justify-center rounded-full border border-slate-200 bg-white text-center">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Total</p>
+                  <p className="text-sm font-bold text-dark-text">{formatCurrencyBn(totalBudget)}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+            {pieces.map((piece) => {
+              const pieceColor = getShareGreenColor(piece.share)
+              return (
+              <div key={`${mode}-${piece.brand}`} className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: pieceColor }} />
+                  <span className="text-sm font-semibold text-dark-text">{piece.brand}</span>
+                </div>
+                <div className="text-right">
+                  <p className="text-sm font-semibold text-dark-text">{formatPct(piece.share)}</p>
+                  <p className="text-xs text-slate-500">{formatCurrencyMn(piece.budget)}</p>
+                </div>
+              </div>
+            )})}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  function renderScenarioMarketModal() {
+    if (!scenarioMarketModal) return null
+    const { row, tone } = scenarioMarketModal
+    const toneChipClass = tone === 'increase' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+    const closeModal = () => setScenarioMarketModal(null)
+    const deltaClass = (value: number) => (value >= 0 ? 'text-success' : 'text-danger')
+
+    return (
+      <div className="fixed inset-0 z-50">
+        <button
+          type="button"
+          aria-label="Close State Detail"
+          className="absolute inset-0 bg-slate-900/45"
+          onClick={closeModal}
+        />
+        <div className="absolute inset-0 flex items-center justify-center p-3 sm:p-6">
+          <div className="w-full max-w-3xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white px-5 py-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-primary">State Detail</p>
+                <p className="text-base font-semibold text-dark-text">{row.market}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${toneChipClass}`}>
+                  {tone === 'increase' ? 'Budget Increased' : 'Budget Decreased'}
+                </span>
+                <button
+                  type="button"
+                  onClick={closeModal}
+                  className="rounded-lg border border-slate-300 bg-white p-1.5 text-slate-600 hover:bg-slate-100"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-3 p-5">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Budget Share</p>
+                  <p className="mt-1 text-sm text-slate-700">
+                    {formatPct(row.old_budget_share_pct, 2)} {'->'} {formatPct(row.new_budget_share_pct, 2)}
+                  </p>
+                  <p className={`mt-1 text-sm font-semibold ${deltaClass(row.budget_share_change_pct)}`}>
+                    {formatSignedPct(row.budget_share_change_pct, 2)}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Spend Shift</p>
+                  <p className={`mt-2 text-lg font-bold ${deltaClass(row.spend_delta_mn)}`}>
+                    {formatSignedCurrencyMn(row.spend_delta_mn)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">TV Split</p>
+                  <p className="mt-1 text-sm text-slate-700">
+                    {formatPct(row.old_tv_split_pct, 2)} {'->'} {formatPct(row.new_tv_split_pct, 2)}
+                  </p>
+                  <p className={`mt-1 text-sm font-semibold ${deltaClass(row.tv_split_change_pct)}`}>
+                    {formatSignedPct(row.tv_split_change_pct, 2)}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Digital Split</p>
+                  <p className="mt-1 text-sm text-slate-700">
+                    {formatPct(row.old_digital_split_pct, 2)} {'->'} {formatPct(row.new_digital_split_pct, 2)}
+                  </p>
+                  <p className={`mt-1 text-sm font-semibold ${deltaClass(row.digital_split_change_pct)}`}>
+                    {formatSignedPct(row.digital_split_change_pct, 2)}
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -2587,16 +3420,18 @@ function App() {
               {step1Collapsed ? (
                 <div className="mt-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
                   <p className="text-slate-700">
-                    Optimized Budget: <span className="font-semibold">{formatCurrency(brandAllocation?.summary.target_total_budget)}</span>
+                    Optimized Budget: <span className="font-semibold">{formatCurrencyBn(brandAllocation?.summary.target_total_budget)}</span>
                   </p>
-                  {hasStep1RevenueEffect ? (
-                    <p className="text-slate-700">
-                      Revenue Effect:{' '}
-                      <span className={`font-semibold ${(brandAllocation?.summary.estimated_total_revenue_uplift_pct ?? 0) >= 0 ? 'text-success' : 'text-danger'}`}>
-                        {formatSignedPct(brandAllocation?.summary.estimated_total_revenue_uplift_pct)}
-                      </span>
-                    </p>
-                  ) : null}
+                  <p className="text-slate-700">
+                    Estimated Revenue Increase:{' '}
+                    <span
+                      className={`font-semibold ${
+                        (brandAllocation?.summary.estimated_total_revenue_uplift_pct ?? 0) >= 0 ? 'text-success' : 'text-danger'
+                      }`}
+                    >
+                      {formatSignedPct(brandAllocation?.summary.estimated_total_revenue_uplift_pct)}
+                    </span>
+                  </p>
                 </div>
               ) : (
                 <>
@@ -2614,22 +3449,17 @@ function App() {
 
                   {!brandAllocationLoading && !brandAllocation && !step1Error ? (
                     <div className="mt-3 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-3 text-sm text-slate-600">
-                      Configure Step 1 inputs and click <span className="font-semibold">Run Step 1</span> to generate national-to-brand allocation.
+                      Initial Budget: <span className="font-semibold">{formatCurrencyBn(step1BaselineBudget)}</span>. Configure Step 1 inputs and click{' '}
+                      <span className="font-semibold">Run Step 1</span> to generate national-to-brand allocation.
                     </div>
                   ) : null}
 
                   {brandAllocation ? (
                     <div className="mt-3 space-y-3">
-                      <div className={`grid gap-3 ${showIncrementalBudget ? 'md:grid-cols-3' : 'md:grid-cols-1'}`}>
-                        {showIncrementalBudget ? (
-                          <div className="rounded-xl border border-slate-200 bg-white p-3">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Initial Total Budget (INR Mn/Bn)</p>
-                            <p className="mt-1 text-xl font-bold text-dark-text">{formatCurrency(brandAllocation.summary.baseline_total_budget)}</p>
-                          </div>
-                        ) : null}
+                      <div className={`grid gap-3 ${showIncrementalBudget ? 'md:grid-cols-2' : 'md:grid-cols-1'}`}>
                         <div className="rounded-xl border border-slate-200 bg-white p-3">
                           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Optimized Total Budget (INR Mn/Bn)</p>
-                          <p className="mt-1 text-xl font-bold text-dark-text">{formatCurrency(brandAllocation.summary.target_total_budget)}</p>
+                          <p className="mt-1 text-xl font-bold text-dark-text">{formatCurrencyBn(brandAllocation.summary.target_total_budget)}</p>
                         </div>
                         {showIncrementalBudget ? (
                           <div className="rounded-xl border border-slate-200 bg-white p-3">
@@ -2643,91 +3473,155 @@ function App() {
                                     : 'text-dark-text'
                               }`}
                             >
-                              {formatSignedCurrency(brandAllocation.summary.incremental_budget)}
+                              {formatSignedCurrencyBn(brandAllocation.summary.incremental_budget)}
                             </p>
                           </div>
                         ) : null}
                       </div>
 
-                      {hasStep1RevenueEffect ? (
-                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Estimated Total Revenue Effect (Objective)</p>
-                          <div className="mt-1 flex flex-wrap items-center gap-4">
-                            <p
-                              className={`text-lg font-bold ${
-                                (brandAllocation.summary.estimated_total_revenue_uplift_abs ?? 0) > 0
-                                  ? 'text-success'
-                                  : (brandAllocation.summary.estimated_total_revenue_uplift_abs ?? 0) < 0
-                                    ? 'text-danger'
-                                    : 'text-dark-text'
-                              }`}
-                            >
-                              {formatSignedCurrency(brandAllocation.summary.estimated_total_revenue_uplift_abs)}
-                            </p>
-                            <p
-                              className={`text-sm font-semibold ${
-                                (brandAllocation.summary.estimated_total_revenue_uplift_pct ?? 0) > 0
-                                  ? 'text-success'
-                                  : (brandAllocation.summary.estimated_total_revenue_uplift_pct ?? 0) < 0
-                                    ? 'text-danger'
-                                    : 'text-slate-700'
-                              }`}
-                            >
-                              {formatSignedPct(brandAllocation.summary.estimated_total_revenue_uplift_pct)}
-                            </p>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Result Metric: Estimated Revenue Increase</p>
+                        <div className="mt-1 flex flex-wrap items-center gap-4">
+                          <p
+                            className={`text-lg font-bold ${
+                              (brandAllocation.summary.estimated_total_revenue_uplift_abs ?? 0) > 0
+                                ? 'text-success'
+                                : (brandAllocation.summary.estimated_total_revenue_uplift_abs ?? 0) < 0
+                                  ? 'text-danger'
+                                  : 'text-dark-text'
+                            }`}
+                          >
+                            {formatSignedCurrencyBn(brandAllocation.summary.estimated_total_revenue_uplift_abs)}
+                          </p>
+                          <p
+                            className={`text-sm font-semibold ${
+                              (brandAllocation.summary.estimated_total_revenue_uplift_pct ?? 0) > 0
+                                ? 'text-success'
+                                : (brandAllocation.summary.estimated_total_revenue_uplift_pct ?? 0) < 0
+                                  ? 'text-danger'
+                                  : 'text-slate-700'
+                            }`}
+                          >
+                            {formatSignedPct(brandAllocation.summary.estimated_total_revenue_uplift_pct)}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Brand Split Before And After Optimization
+                          </p>
+                          <div className="flex items-center gap-2">
+                            {!step1EditMode ? (
+                              <button
+                                type="button"
+                                onClick={handleEditStep1Allocations}
+                                className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                              >
+                                Edit Allocated Budget
+                              </button>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={resetStep1AllocationDraft}
+                                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                                >
+                                  Reset Draft
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleCancelStep1Allocations}
+                                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={handleSaveStep1Allocations}
+                                  className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                                >
+                                  Save Allocation
+                                </button>
+                              </>
+                            )}
                           </div>
                         </div>
-                      ) : null}
 
-                      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
-                        <table className="min-w-full text-sm">
-                          <thead className="bg-slate-50">
-                            <tr className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                              <th className="px-4 py-2 text-left">Brand</th>
-                              <th className="px-4 py-2 text-right">Initial Budget (INR Bn)</th>
-                              <th className="px-4 py-2 text-right">Share</th>
-                              <th className="px-4 py-2 text-right">Allocated (INR Bn)</th>
-                              <th className="px-4 py-2 text-right">Uplift (%)</th>
-                              <th className="px-4 py-2 text-right">Revenue Effect (%)</th>
-                              <th className="px-4 py-2 text-right">Elasticity</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-200">
-                            {brandAllocation.allocation_rows.map((row, index) => (
-                              <tr key={row.brand} className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
-                                <td className="px-4 py-2.5 font-semibold text-dark-text">{row.brand}</td>
-                                <td className="px-4 py-2.5 text-right text-slate-700">{formatCurrencyBn(row.baseline_budget)}</td>
-                                <td className="px-4 py-2.5 text-right text-slate-700">{formatPct(row.share * 100)}</td>
-                                <td className="px-4 py-2.5 text-right text-slate-700">{formatCurrencyBn(row.allocated_budget)}</td>
-                                <td
-                                  className={`px-4 py-2.5 text-right font-semibold ${
-                                    (row.uplift_amount ?? 0) > 0
-                                      ? 'text-success'
-                                      : (row.uplift_amount ?? 0) < 0
-                                        ? 'text-danger'
-                                        : 'text-slate-700'
-                                  }`}
-                                >
-                                  {formatUpliftPctFromBudget(row.uplift_amount, row.baseline_budget)}
-                                </td>
-                                <td
-                                  className={`px-4 py-2.5 text-right font-semibold ${
-                                    (row.estimated_revenue_uplift_pct ?? 0) > 0
-                                      ? 'text-success'
-                                      : (row.estimated_revenue_uplift_pct ?? 0) < 0
-                                        ? 'text-danger'
-                                        : 'text-slate-700'
-                                  }`}
-                                >
-                                  {formatSignedPct(row.estimated_revenue_uplift_pct)}
-                                </td>
-                                <td className="px-4 py-2.5 text-right text-slate-700">
-                                  {formatRawNumber(row.effective_elasticity ?? row.elasticity)}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                        {step1EditMode ? (
+                          <>
+                            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                              Edited Total Budget: <span className="font-semibold text-dark-text">{formatCurrencyBn(step1EditedTotalBudget)}</span>
+                            </div>
+
+                            {step1EditError ? (
+                              <div className="rounded-lg border border-danger/20 bg-danger/10 px-3 py-2 text-sm text-danger">
+                                {step1EditError}
+                              </div>
+                            ) : null}
+
+                            <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+                              <table className="min-w-full text-sm">
+                                <thead className="bg-slate-50">
+                                  <tr className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                    <th className="px-4 py-2 text-left">Brand</th>
+                                    <th className="px-4 py-2 text-right">Initial Budget (INR Bn)</th>
+                                    <th className="px-4 py-2 text-right">Initial Split (%)</th>
+                                    <th className="px-4 py-2 text-right">Min-Max (INR Bn)</th>
+                                    <th className="px-4 py-2 text-right">Allocated (INR Bn)</th>
+                                    <th className="px-4 py-2 text-right">Optimized Split (%)</th>
+                                  </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-200">
+                                  {brandAllocation.allocation_rows.map((row, index) => {
+                                    const baselineSplit =
+                                      Math.abs(brandAllocation.summary.baseline_total_budget) > 1e-9
+                                        ? (row.baseline_budget / brandAllocation.summary.baseline_total_budget) * 100
+                                        : 0
+                                    const draftBn = Number(step1AllocationDraft[row.brand])
+                                    const allocatedValue =
+                                      step1EditMode && Number.isFinite(draftBn) ? draftBn * 1_000_000_000 : row.allocated_budget
+                                    const minAllowed = Number(row.min_allowed_budget ?? row.baseline_budget * 0.75)
+                                    const maxAllowed = Number(row.max_allowed_budget ?? row.baseline_budget * 1.25)
+                                    const optimizedSplit =
+                                      Math.abs(brandAllocation.summary.target_total_budget) > 1e-9
+                                        ? (allocatedValue / brandAllocation.summary.target_total_budget) * 100
+                                        : 0
+                                    return (
+                                      <tr key={row.brand} className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
+                                        <td className="px-4 py-2.5 font-semibold text-dark-text">{row.brand}</td>
+                                        <td className="px-4 py-2.5 text-right text-slate-700">{formatCurrencyBn(row.baseline_budget)}</td>
+                                        <td className="px-4 py-2.5 text-right text-slate-700">{formatPct(baselineSplit)}</td>
+                                        <td className="px-4 py-2.5 text-right text-slate-700">
+                                          {formatCurrencyBn(minAllowed)} - {formatCurrencyBn(maxAllowed)}
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right text-slate-700">
+                                          <input
+                                            type="number"
+                                            min={String(minAllowed / 1_000_000_000)}
+                                            max={String(maxAllowed / 1_000_000_000)}
+                                            step="0.0001"
+                                            value={step1AllocationDraft[row.brand] ?? ''}
+                                            onChange={(event) => handleStep1DraftChange(row.brand, event.target.value)}
+                                            className="ml-auto w-36 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-right text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
+                                            title={`Allowed range: ${formatCurrencyBn(minAllowed)} to ${formatCurrencyBn(maxAllowed)}`}
+                                          />
+                                        </td>
+                                        <td className="px-4 py-2.5 text-right text-slate-700">{formatPct(optimizedSplit)}</td>
+                                      </tr>
+                                    )
+                                  })}
+                                </tbody>
+                              </table>
+                            </div>
+                          </>
+                        ) : (
+                          <div className="grid gap-3 xl:grid-cols-2">
+                            {renderStep1SplitPieCard('baseline')}
+                            {renderStep1SplitPieCard('optimized')}
+                          </div>
+                        )}
                       </div>
 
                       {!step2Enabled ? (
@@ -2736,9 +3630,11 @@ function App() {
                             type="button"
                             onClick={() => {
                               setStep2Enabled(true)
+                              setStep2SetupCollapsed(false)
                               setStep1Collapsed(true)
                             }}
-                            className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+                            disabled={step1EditMode}
+                            className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-400"
                           >
                             Go To Brand-Market Allocation
                           </button>
@@ -2753,13 +3649,39 @@ function App() {
             {step2Enabled ? (
               <>
                 <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-panel sm:p-5">
-                  <div className="mb-4 flex items-center justify-between gap-3">
+                  <div className="mb-3 flex items-center justify-between gap-3">
                     <div>
                       <h2 className="text-lg font-semibold text-dark-text">Step 2: Brand And Market Scenario Generation</h2>
-                      <p className="mt-1 text-sm text-slate-500">Follow the flow: select brand, provide AI intent, edit constraints, then generate scenarios.</p>
+                      <p className="mt-1 text-sm text-slate-500">
+                        {step2SetupCollapsed
+                          ? 'Setup collapsed after generate. Scenario selection stays active below.'
+                          : 'Follow the flow: select brand, provide AI intent, edit constraints, then generate scenarios.'}
+                      </p>
                     </div>
+                    <button
+                      type="button"
+                      onClick={() => setStep2SetupCollapsed((prev) => !prev)}
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-50"
+                    >
+                      {step2SetupCollapsed ? 'Open Setup' : 'Collapse Setup'}
+                    </button>
                   </div>
-                  {renderSetupForm('step2')}
+                  {step2SetupCollapsed ? (
+                    <button
+                      type="button"
+                      onClick={() => setStep2SetupCollapsed(false)}
+                      className="mb-2 w-full rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-left text-xs font-semibold text-primary hover:bg-blue-100"
+                    >
+                      Step 2 Setup is collapsed. Click to reopen inputs and constraints.
+                    </button>
+                  ) : null}
+                  <div
+                    className={`overflow-hidden transition-all duration-300 ease-out ${
+                      step2SetupCollapsed ? 'max-h-0 -translate-y-1 opacity-0 pointer-events-none' : 'max-h-[2600px] translate-y-0 opacity-100'
+                    }`}
+                  >
+                    <div className="pt-1">{renderSetupForm('step2')}</div>
+                  </div>
                 </section>
               </>
             ) : (
@@ -2783,24 +3705,24 @@ function App() {
                   <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                     <p className="text-sm font-semibold text-dark-text">{scenarioResults.summary.scenario_count} scenarios generated!</p>
                     <p className="mt-1 text-xs text-slate-600">
-                      Highest Volume: {formatSignedPct(scenarioResults.anchors.best_volume?.volume_uplift_pct)} | Highest Revenue: {formatSignedPct(scenarioResults.anchors.best_revenue?.revenue_uplift_pct)}
+                      Highest Revenue: {formatSignedPct(scenarioResults.anchors.best_revenue?.revenue_uplift_pct)}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-600">
+                      Budget Utilized (Top shown): {scenarioResults.items.length > 0 ? formatCurrencyBn(scenarioResults.items[0].total_new_spend) : '-'}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-600">
+                      Max Budget Utilized (Page): {scenarioMaxBudgetUtilizedPct.toFixed(1)}%
                     </p>
                   </div>
 
                   <div className="rounded-xl border border-slate-200 bg-white p-4">
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="grid gap-2 sm:grid-cols-2">
                       <select value={scenarioSortKey} onChange={(event) => { setScenarioSortKey(event.target.value); setScenarioPage(1) }} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200">
                         <option value="revenue_uplift_pct">Sort by: Revenue</option>
-                        <option value="volume_uplift_pct">Sort by: Volume</option>
                       </select>
                       <select value={scenarioSortDir} onChange={(event) => { setScenarioSortDir(event.target.value === 'asc' ? 'asc' : 'desc'); setScenarioPage(1) }} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200">
                         <option value="desc">Descending</option>
                         <option value="asc">Ascending</option>
-                      </select>
-                      <select value={scenarioPageSize} onChange={(event) => { setScenarioPageSize(Number(event.target.value)); setScenarioPage(1) }} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200">
-                        <option value={12}>12 / page</option>
-                        <option value={25}>25 / page</option>
-                        <option value={50}>50 / page</option>
                       </select>
                     </div>
 
@@ -2817,32 +3739,73 @@ function App() {
                       </div>
                     </div>
 
+                    <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                      {selectedScenario ? (
+                        <>
+                          <span className="font-semibold text-dark-text">{selectedScenario.scenario_id}</span>
+                          <span className="mx-2 text-slate-400">|</span>
+                          Revenue: <span className={`font-semibold ${selectedScenario.revenue_uplift_pct >= 0 ? 'text-success' : 'text-danger'}`}>{formatSignedPct(selectedScenario.revenue_uplift_pct, 2)}</span>
+                          <span className="mx-2 text-slate-400">|</span>
+                          Budget Utilized: <span className="font-semibold text-dark-text">{formatCurrencyBn(selectedScenario.total_new_spend)}</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-slate-500">No scenario selected.</span>
+                          {scenarioResults.items.length > 0 ? (
+                            <>
+                              <span className="mx-2 text-slate-400">|</span>
+                              Top shown: <span className="font-semibold text-dark-text">{scenarioResults.items[0].scenario_id}</span>
+                              <span className="mx-2 text-slate-400">|</span>
+                              Budget Utilized: <span className="font-semibold text-dark-text">{formatCurrencyBn(scenarioResults.items[0].total_new_spend)}</span>
+                            </>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+
                     {scenarioResults.pagination.total_count === 0 ? (
                       <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-8 text-center text-sm font-semibold text-slate-600">
                         No scenarios match current filters.
                       </div>
                     ) : (
                       <>
-                        <div className="mt-3 overflow-x-auto rounded-lg border border-slate-200 bg-white">
-                          <svg width={scenarioChartWidth} height={290} role="img" aria-label="Scenario comparison chart">
+                        <div className="mt-3 rounded-lg border border-slate-200 bg-white px-2 py-2 sm:px-3">
+                          <svg className="w-full" viewBox={`0 0 ${scenarioChartWidth} 320`} role="img" aria-label="Revenue and budget utilized comparison chart">
                             {(() => {
-                              const chartHeight = 290
-                              const left = 64
-                              const right = 28
-                              const top = 20
-                              const bottom = 42
+                              const chartHeight = 320
+                              const left = 66
+                              const right = 66
+                              const top = 32
+                              const bottom = 46
                               const plotWidth = scenarioChartWidth - left - right
                               const plotHeight = chartHeight - top - bottom
-                              const safeMax = Math.max(1, scenarioBarMaxAbs)
-                              const yFor = (value: number) => top + ((safeMax - value) / (2 * safeMax)) * plotHeight
-                              const zeroY = yFor(0)
-                              const ticks = [-safeMax, -safeMax / 2, 0, safeMax / 2, safeMax]
+                              const revenues = scenarioResults.items.map((item) => Number(item.revenue_uplift_pct ?? 0))
+                              const revMinRaw = Math.min(0, ...revenues)
+                              const revMaxRaw = Math.max(1, ...revenues)
+                              const revAxisMin = revMinRaw < -0.001 ? revMinRaw * 1.12 : 0
+                              const revAxisMax = revMaxRaw * 1.12
+                              const budgetMax = Math.max(100, scenarioBudgetAxisMax)
+                              const targetBudget = Number(scenarioResults.summary.target_budget ?? 0)
+                              const revSpan = Math.max(1e-6, revAxisMax - revAxisMin)
+                              const yRev = (value: number) => top + ((revAxisMax - value) / revSpan) * plotHeight
+                              const zeroRevY = yRev(0)
+                              const yBudget = (value: number) => {
+                                const clamped = Math.max(0, Math.min(budgetMax, value))
+                                const upRange = Math.max(1, zeroRevY - top)
+                                return zeroRevY - (clamped / budgetMax) * upRange
+                              }
+                              const revTicks =
+                                revAxisMin < -0.001
+                                  ? [revAxisMin, revAxisMin * 0.5, 0, revAxisMax * 0.5, revAxisMax]
+                                  : [0, revAxisMax * 0.25, revAxisMax * 0.5, revAxisMax * 0.75, revAxisMax]
+                              const budgetTicks = [0, budgetMax * 0.25, budgetMax * 0.5, budgetMax * 0.75, budgetMax]
+                              const maxBudgetLineY = yBudget(scenarioMaxBudgetUtilizedPct)
                               return (
                                 <>
-                                  {ticks.map((tick, idx) => {
-                                    const y = yFor(tick)
+                                  {revTicks.map((tick, idx) => {
+                                    const y = yRev(tick)
                                     return (
-                                      <g key={`tick-${idx}`}>
+                                      <g key={`rev-tick-${idx}`}>
                                         <line x1={left} x2={scenarioChartWidth - right} y1={y} y2={y} stroke={tick === 0 ? '#94A3B8' : '#E2E8F0'} />
                                         <text x={left - 8} y={y + 4} textAnchor="end" fill="#64748B" fontSize="10">
                                           {tick.toFixed(1)}%
@@ -2850,48 +3813,85 @@ function App() {
                                       </g>
                                     )
                                   })}
+                                  {budgetTicks.map((tick, idx) => {
+                                    const y = yBudget(tick)
+                                    return (
+                                      <text key={`budget-axis-${idx}`} x={scenarioChartWidth - right + 8} y={y + 4} textAnchor="start" fill="#64748B" fontSize="10">
+                                        {tick.toFixed(0)}%
+                                      </text>
+                                    )
+                                  })}
+                                  <line
+                                    x1={left}
+                                    x2={scenarioChartWidth - right}
+                                    y1={maxBudgetLineY}
+                                    y2={maxBudgetLineY}
+                                    stroke="#3B82F6"
+                                    strokeDasharray="4 4"
+                                  />
                                   {scenarioResults.items.map((item, idx) => {
                                     const groupWidth = plotWidth / Math.max(1, scenarioResults.items.length)
                                     const centerX = left + groupWidth * (idx + 0.5)
-                                    const barWidth = Math.min(18, groupWidth * 0.24)
-                                    const gap = 4
-                                    const volX = centerX - barWidth - gap / 2
-                                    const revX = centerX + gap / 2
-                                    const volY = yFor(item.volume_uplift_pct)
-                                    const revY = yFor(item.revenue_uplift_pct)
-                                    const volHeight = Math.abs(zeroY - volY)
-                                    const revHeight = Math.abs(zeroY - revY)
+                                    const barWidth = Math.min(14, Math.max(9, groupWidth * 0.11))
+                                    const gap = Math.max(22, Math.min(34, groupWidth * 0.34))
+                                    const revX = centerX - barWidth - gap / 2
+                                    const budgetX = centerX + gap / 2
+                                    const revYv = yRev(item.revenue_uplift_pct)
+                                    const revH = Math.abs(zeroRevY - revYv)
+                                    const utilPct = targetBudget > 1e-12 ? (Number(item.total_new_spend ?? 0) / targetBudget) * 100 : 0
+                                    const budY = yBudget(utilPct)
+                                    const budH = Math.max(1, zeroRevY - budY)
+                                    const revLabelX = revX + barWidth / 2 - 4
+                                    const budgetLabelX = budgetX + barWidth / 2 + 4
+                                    const labelYMin = top + 12
+                                    const labelYMax = chartHeight - bottom - 6
+                                    let finalRevLabelY = Math.max(
+                                      labelYMin,
+                                      Math.min(labelYMax, Math.min(revYv, zeroRevY) - 6),
+                                    )
+                                    let finalBudgetLabelY = Math.max(labelYMin, Math.min(labelYMax, budY - 6))
+                                    if (Math.abs(finalRevLabelY - finalBudgetLabelY) < 10) {
+                                      finalBudgetLabelY = Math.min(labelYMax, finalBudgetLabelY + 10)
+                                    }
                                     const isSelected = selectedScenarioId === item.scenario_id
                                     const label = item.scenario_id.length > 14 ? `${item.scenario_id.slice(0, 14)}...` : item.scenario_id
                                     return (
                                       <g key={item.scenario_id} onClick={() => setSelectedScenarioId(item.scenario_id)} style={{ cursor: 'pointer' }}>
                                         {isSelected ? (
-                                          <rect x={centerX - groupWidth / 2 + 4} y={top} width={groupWidth - 8} height={plotHeight} fill="#EFF6FF" stroke="#93C5FD" rx={4} />
+                                          <rect x={centerX - groupWidth / 2 + 8} y={top} width={groupWidth - 16} height={plotHeight} fill="#EFF6FF" stroke="#93C5FD" rx={6} />
                                         ) : null}
-                                        <rect x={volX} y={Math.min(volY, zeroY)} width={barWidth} height={Math.max(1, volHeight)} fill="#2563EB" />
-                                        <rect x={revX} y={Math.min(revY, zeroY)} width={barWidth} height={Math.max(1, revHeight)} fill="#22C55E" />
-                                        <text x={volX + barWidth / 2} y={item.volume_uplift_pct >= 0 ? volY - 5 : volY + 14} textAnchor="middle" fontSize="10" fill="#1E293B" fontWeight="600">
-                                          {formatSignedPct(item.volume_uplift_pct, 1)}
-                                        </text>
-                                        <text x={revX + barWidth / 2} y={item.revenue_uplift_pct >= 0 ? revY - 5 : revY + 14} textAnchor="middle" fontSize="10" fill="#1E293B" fontWeight="600">
+                                        <rect x={revX} y={Math.min(revYv, zeroRevY)} width={barWidth} height={Math.max(1, revH)} fill="#22C55E" />
+                                        <rect x={budgetX} y={budY} width={barWidth} height={budH} fill="#2563EB" />
+                                        <text x={revLabelX} y={finalRevLabelY} textAnchor="end" fontSize="10" fill="#0F172A" fontWeight="800">
                                           {formatSignedPct(item.revenue_uplift_pct, 1)}
                                         </text>
-                                        <text x={centerX} y={chartHeight - 16} textAnchor="middle" fontSize="10" fill="#334155" fontWeight={isSelected ? '700' : '500'}>
+                                        <text
+                                          x={budgetLabelX}
+                                          y={finalBudgetLabelY}
+                                          textAnchor="start"
+                                          fontSize="10"
+                                          fill="#0F172A"
+                                          fontWeight="800"
+                                        >
+                                          {utilPct.toFixed(1)}%
+                                        </text>
+                                        <text x={centerX} y={chartHeight - 18} textAnchor="middle" fontSize="11" fill="#334155" fontWeight={isSelected ? '700' : '500'}>
                                           {label}
                                         </text>
                                       </g>
                                     )
                                   })}
                                   <line x1={left} x2={left} y1={top} y2={chartHeight - bottom} stroke="#94A3B8" />
+                                  <line x1={scenarioChartWidth - right} x2={scenarioChartWidth - right} y1={top} y2={chartHeight - bottom} stroke="#94A3B8" />
                                   <line x1={left} x2={scenarioChartWidth - right} y1={chartHeight - bottom} y2={chartHeight - bottom} stroke="#94A3B8" />
                                 </>
                               )
                             })()}
                           </svg>
-                        </div>
-                        <div className="mt-2 flex items-center justify-center gap-4 text-xs text-slate-600">
-                          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-sm bg-primary" />Volume %</span>
-                          <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-sm bg-green-500" />Revenue %</span>
+                          <div className="mt-2 flex items-center justify-center gap-4 text-xs text-slate-600">
+                            <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-sm bg-green-500" />Revenue %</span>
+                            <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-sm bg-primary" />Budget Utilized %</span>
+                          </div>
                         </div>
                       </>
                     )}
@@ -2899,23 +3899,6 @@ function App() {
                     <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-3">
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">FILTER SCENARIOS</p>
                       <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                        <div>
-                          <label className="text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor="scenario-min-volume">
-                            Min Volume % Increase
-                          </label>
-                          <input
-                            id="scenario-min-volume"
-                            type="number"
-                            step="0.01"
-                            value={scenarioMinVolumePct}
-                            onChange={(event) => {
-                              setScenarioMinVolumePct(event.target.value)
-                              setScenarioPage(1)
-                            }}
-                            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
-                            placeholder="e.g. 3.0"
-                          />
-                        </div>
                         <div>
                           <label className="text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor="scenario-min-revenue">
                             Min Revenue % Increase
@@ -2933,51 +3916,273 @@ function App() {
                             placeholder="e.g. 2.5"
                           />
                         </div>
+                        <div>
+                          <label className="text-xs font-semibold uppercase tracking-wide text-slate-500" htmlFor="scenario-max-budget-utilized">
+                            Max Budget Utilized %
+                          </label>
+                          <input
+                            id="scenario-max-budget-utilized"
+                            type="number"
+                            step="0.01"
+                            value={scenarioMaxBudgetUtilizedPctFilter}
+                            onChange={(event) => {
+                              setScenarioMaxBudgetUtilizedPctFilter(event.target.value)
+                              setScenarioPage(1)
+                            }}
+                            className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
+                            placeholder="e.g. 100"
+                          />
+                        </div>
                       </div>
                     </div>
 
                     {selectedScenario ? (
                       <div className="mt-4">
                         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Selected Scenario Market Split</p>
-                        <div className="mt-2 overflow-x-auto rounded-lg border border-slate-200">
-                          <table className="min-w-full divide-y divide-slate-200 text-sm">
-                            <thead className="bg-slate-50 text-slate-600">
-                              <tr>
-                                <th className="px-3 py-2 text-left">Market</th>
-                                <th className="px-3 py-2 text-right">Budget Share</th>
-                                <th className="px-3 py-2 text-right">TV Split</th>
-                                <th className="px-3 py-2 text-right">Digital Split</th>
-                                <th className="px-3 py-2 text-right">TV Delta Reach</th>
-                                <th className="px-3 py-2 text-right">Digital Delta Reach</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
-                              {selectedScenario.markets.map((row) => (
-                                <tr key={`${selectedScenario.scenario_id}-${row.market}`}>
-                                  <td className="px-3 py-2.5 font-semibold text-dark-text">{row.market}</td>
-                                  <td className="px-3 py-2.5 text-right">{formatPct(row.new_budget_share * 100)}</td>
-                                  <td className="px-3 py-2.5 text-right">{formatPct(row.tv_split * 100)}</td>
-                                  <td className="px-3 py-2.5 text-right">{formatPct(row.digital_split * 100)}</td>
-                                  <td className={`px-3 py-2.5 text-right font-semibold ${row.tv_delta_reach_pct >= 0 ? 'text-success' : 'text-danger'}`}>{formatSignedPct(row.tv_delta_reach_pct)}</td>
-                                  <td className={`px-3 py-2.5 text-right font-semibold ${row.digital_delta_reach_pct >= 0 ? 'text-success' : 'text-danger'}`}>{formatSignedPct(row.digital_delta_reach_pct)}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
+                        <div className="mt-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+                          <p className="text-xs font-semibold text-slate-700">
+                            Shift View: {selectedScenarioBudgetFlow.increased.length} increase markets | {selectedScenarioBudgetFlow.decreased.length} decrease markets
+                          </p>
+                          <select
+                            value={scenarioFlowSortKey}
+                            onChange={(event) => setScenarioFlowSortKey(event.target.value === 'spend' ? 'spend' : 'share')}
+                            className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
+                          >
+                            <option value="share">Sort by Share Shift (pp)</option>
+                            <option value="spend">Sort by Spend Shift (INR Mn)</option>
+                          </select>
+                        </div>
+
+                        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                          <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-emerald-700">Where Budget Increased</p>
+                            <div className="mt-2 space-y-2">
+                              {selectedScenarioBudgetFlow.increased.length === 0 ? (
+                                <div className="rounded-lg border border-emerald-100 bg-white px-3 py-2 text-sm text-slate-600">
+                                  No markets with budget increase in this scenario.
+                                </div>
+                              ) : (
+                                selectedScenarioBudgetFlow.increased.map((row) => {
+                                  const shareWidth = Math.max(
+                                    8,
+                                    (Math.abs(row.budget_share_change_pct) / selectedScenarioBudgetFlow.maxShareDeltaPct) * 100,
+                                  )
+                                  const spendWidth = Math.max(
+                                    8,
+                                    (Math.abs(row.spend_delta_mn) / selectedScenarioBudgetFlow.maxSpendDeltaMn) * 100,
+                                  )
+                                  return (
+                                    <button
+                                      key={`inc-${selectedScenario.scenario_id}-${row.market}`}
+                                      type="button"
+                                      onClick={() => setScenarioMarketModal({ row, tone: 'increase' })}
+                                      className="w-full rounded-lg border border-emerald-100 bg-white p-2.5 text-left shadow-sm transition-all duration-200 hover:shadow focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                                    >
+                                      <div className="flex items-center justify-between gap-2">
+                                        <p className="text-sm font-semibold text-dark-text">{row.market}</p>
+                                        <p className="text-xs font-semibold text-emerald-700">{formatSignedPct(row.budget_share_change_pct, 2)}</p>
+                                      </div>
+                                      <div className="mt-1 grid gap-1 text-[11px] text-slate-600 sm:grid-cols-2">
+                                        <p>Budget Share: {formatPct(row.old_budget_share_pct, 2)} {'->'} {formatPct(row.new_budget_share_pct, 2)}</p>
+                                        <p>Spend Shift: <span className="font-semibold text-emerald-700">{formatSignedCurrencyMn(row.spend_delta_mn)}</span></p>
+                                      </div>
+                                      <div className="mt-2 space-y-1.5">
+                                        <div>
+                                          <div className="mb-0.5 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                            <span>Share Shift</span>
+                                            <span>{formatSignedPct(row.budget_share_change_pct, 2)}</span>
+                                          </div>
+                                          <div className="h-1.5 w-full rounded-full bg-emerald-100">
+                                            <div className="h-full rounded-full bg-emerald-500 transition-all duration-300" style={{ width: `${Math.min(100, shareWidth)}%` }} />
+                                          </div>
+                                        </div>
+                                        <div>
+                                          <div className="mb-0.5 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                            <span>Spend Shift (Mn)</span>
+                                            <span>{formatSignedCurrencyMn(row.spend_delta_mn)}</span>
+                                          </div>
+                                          <div className="h-1.5 w-full rounded-full bg-emerald-100">
+                                            <div className="h-full rounded-full bg-emerald-400 transition-all duration-300" style={{ width: `${Math.min(100, spendWidth)}%` }} />
+                                          </div>
+                                        </div>
+                                      </div>
+                                      <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                                        <span className={`rounded-full px-2 py-0.5 font-semibold ${row.tv_split_change_pct >= 0 ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
+                                          TV {formatSignedPct(row.tv_split_change_pct, 2)}
+                                        </span>
+                                        <span className={`rounded-full px-2 py-0.5 font-semibold ${row.digital_split_change_pct >= 0 ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
+                                          Digital {formatSignedPct(row.digital_split_change_pct, 2)}
+                                        </span>
+                                      </div>
+                                    </button>
+                                  )
+                                })
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="rounded-xl border border-rose-200 bg-rose-50/40 p-3">
+                            <p className="text-xs font-semibold uppercase tracking-wide text-rose-700">Where Budget Decreased</p>
+                            <div className="mt-2 space-y-2">
+                              {selectedScenarioBudgetFlow.decreased.length === 0 ? (
+                                <div className="rounded-lg border border-rose-100 bg-white px-3 py-2 text-sm text-slate-600">
+                                  No markets with budget decrease in this scenario.
+                                </div>
+                              ) : (
+                                selectedScenarioBudgetFlow.decreased.map((row) => {
+                                  const shareWidth = Math.max(
+                                    8,
+                                    (Math.abs(row.budget_share_change_pct) / selectedScenarioBudgetFlow.maxShareDeltaPct) * 100,
+                                  )
+                                  const spendWidth = Math.max(
+                                    8,
+                                    (Math.abs(row.spend_delta_mn) / selectedScenarioBudgetFlow.maxSpendDeltaMn) * 100,
+                                  )
+                                  return (
+                                    <button
+                                      key={`dec-${selectedScenario.scenario_id}-${row.market}`}
+                                      type="button"
+                                      onClick={() => setScenarioMarketModal({ row, tone: 'decrease' })}
+                                      className="w-full rounded-lg border border-rose-100 bg-white p-2.5 text-left shadow-sm transition-all duration-200 hover:shadow focus:outline-none focus:ring-2 focus:ring-rose-200"
+                                    >
+                                      <div className="flex items-center justify-between gap-2">
+                                        <p className="text-sm font-semibold text-dark-text">{row.market}</p>
+                                        <p className="text-xs font-semibold text-rose-700">{formatSignedPct(row.budget_share_change_pct, 2)}</p>
+                                      </div>
+                                      <div className="mt-1 grid gap-1 text-[11px] text-slate-600 sm:grid-cols-2">
+                                        <p>Budget Share: {formatPct(row.old_budget_share_pct, 2)} {'->'} {formatPct(row.new_budget_share_pct, 2)}</p>
+                                        <p>Spend Shift: <span className="font-semibold text-rose-700">{formatSignedCurrencyMn(row.spend_delta_mn)}</span></p>
+                                      </div>
+                                      <div className="mt-2 space-y-1.5">
+                                        <div>
+                                          <div className="mb-0.5 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                            <span>Share Shift</span>
+                                            <span>{formatSignedPct(row.budget_share_change_pct, 2)}</span>
+                                          </div>
+                                          <div className="h-1.5 w-full rounded-full bg-rose-100">
+                                            <div className="h-full rounded-full bg-rose-500 transition-all duration-300" style={{ width: `${Math.min(100, shareWidth)}%` }} />
+                                          </div>
+                                        </div>
+                                        <div>
+                                          <div className="mb-0.5 flex items-center justify-between text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                                            <span>Spend Shift (Mn)</span>
+                                            <span>{formatSignedCurrencyMn(row.spend_delta_mn)}</span>
+                                          </div>
+                                          <div className="h-1.5 w-full rounded-full bg-rose-100">
+                                            <div className="h-full rounded-full bg-rose-400 transition-all duration-300" style={{ width: `${Math.min(100, spendWidth)}%` }} />
+                                          </div>
+                                        </div>
+                                      </div>
+                                      <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                                        <span className={`rounded-full px-2 py-0.5 font-semibold ${row.tv_split_change_pct >= 0 ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
+                                          TV {formatSignedPct(row.tv_split_change_pct, 2)}
+                                        </span>
+                                        <span className={`rounded-full px-2 py-0.5 font-semibold ${row.digital_split_change_pct >= 0 ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-700'}`}>
+                                          Digital {formatSignedPct(row.digital_split_change_pct, 2)}
+                                        </span>
+                                      </div>
+                                    </button>
+                                  )
+                                })
+                              )}
+                            </div>
+                          </div>
                         </div>
                       </div>
                     ) : null}
                   </div>
                 </section>
-              ) : scenarioStatus === 'queued' || scenarioStatus === 'running' ? (
+              ) : scenarioGenerationActive ? (
                 <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-panel">
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-5 py-6">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-primary">Scenario Generation In Progress</p>
-                    <p className="mt-1 text-sm text-slate-600">{scenarioMessage || 'Running AI + Monte Carlo engine...'}</p>
-                    <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200">
-                      <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${Math.max(0, Math.min(100, scenarioProgress))}%` }} />
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-5 py-6 sm:px-6">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-primary">Scenario Generation In Progress</p>
+                        <p className="mt-1 text-sm font-semibold text-dark-text">
+                          {scenarioMessage || 'Running AI + Monte Carlo engine...'}
+                        </p>
+                        <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
+                          <span>Stage: {activeScenarioStage.label}</span>
+                          <span className="h-1 w-1 rounded-full bg-slate-300" />
+                          <span>Elapsed: {scenarioElapsedLabel}</span>
+                        </div>
+                      </div>
+                      <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5">
+                        <LoaderCircle className="h-4 w-4 animate-spin text-primary" />
+                        <span className="text-sm font-semibold text-primary">{normalizedScenarioProgress}%</span>
+                      </div>
                     </div>
-                    <p className="mt-2 text-xs text-slate-500">{scenarioProgress}%</p>
+
+                    <div className="relative mt-4 h-2.5 w-full overflow-hidden rounded-full bg-slate-200">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-blue-600 via-blue-500 to-indigo-500 transition-all duration-500"
+                        style={{ width: `${normalizedScenarioProgress}%` }}
+                      />
+                      <div className="pointer-events-none absolute inset-0 animate-pulse bg-white/10" />
+                    </div>
+
+                    <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                      {SCENARIO_PROGRESS_STAGES.map((stage, index) => {
+                        const stageDone = normalizedScenarioProgress >= stage.end
+                        const stageActive = index === activeScenarioStageIndex
+                        return (
+                          <div
+                            key={`scenario-stage-${stage.key}`}
+                            className={`rounded-lg border px-3 py-2 ${
+                              stageDone
+                                ? 'border-green-200 bg-green-50'
+                                : stageActive
+                                  ? 'border-blue-200 bg-blue-50'
+                                  : 'border-slate-200 bg-white'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              {stageDone ? (
+                                <CheckCircle2 className="h-4 w-4 text-success" />
+                              ) : stageActive ? (
+                                <LoaderCircle className="h-4 w-4 animate-spin text-primary" />
+                              ) : (
+                                <div className="h-2.5 w-2.5 rounded-full bg-slate-300" />
+                              )}
+                              <p className={`text-xs font-semibold uppercase tracking-wide ${stageDone ? 'text-success' : stageActive ? 'text-primary' : 'text-slate-500'}`}>
+                                {stage.label}
+                              </p>
+                            </div>
+                            <p className="mt-1 text-xs text-slate-600">{stage.hint}</p>
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    <div className="mt-4 rounded-lg border border-slate-200 bg-white p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          <Activity className="h-3.5 w-3.5 text-primary" />
+                          Engine Activity
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
+                          <span className="h-2 w-2 rounded-full bg-primary/80 animate-pulse" style={{ animationDelay: '160ms' }} />
+                          <span className="h-2 w-2 rounded-full bg-primary/60 animate-pulse" style={{ animationDelay: '320ms' }} />
+                        </div>
+                      </div>
+                      <div className="mt-2 space-y-2">
+                        {scenarioActivityBars.map((bar) => (
+                          <div key={`scenario-activity-${bar.key}`}>
+                            <div className="mb-1 flex items-center justify-between text-[11px] text-slate-500">
+                              <span>{bar.label}</span>
+                              <span>{Math.round(bar.pct)}%</span>
+                            </div>
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+                              <div
+                                className="h-full rounded-full bg-primary/80 transition-all duration-500 animate-pulse"
+                                style={{ width: `${bar.pct}%` }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   </div>
                 </section>
               ) : (
@@ -2994,6 +4199,7 @@ function App() {
           )}
         </main>
       </div>
+      {renderScenarioMarketModal()}
       {renderAiModeModal()}
     </div>
   )

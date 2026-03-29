@@ -31,6 +31,8 @@ SCENARIO_TARGET_DEFAULT = 1000
 SCENARIO_TARGET_NEAR_OPT = 100
 SCENARIO_NEAR_OPT_MIN_DISTANCE = 0.04
 SCENARIO_DEFAULT_MIN_DISTANCE = 0.04
+# Legacy fallback only when explicit scenario band is not supplied by client.
+SCENARIO_BUDGET_BAND_LOWER_RATIO = 0.85
 SCENARIO_MAX_ATTEMPTS = 65000
 SCENARIO_PAGE_SIZE_DEFAULT = 25
 SCENARIO_PAGE_SIZE_MAX = 200
@@ -61,6 +63,8 @@ class ScenarioJobCreateRequest(BaseModel):
     budget_increase_value: float = 5.0
     market_overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
     intent_prompt: str = ""
+    scenario_budget_lower: float | None = None
+    scenario_budget_upper: float | None = None
     target_scenarios: int = SCENARIO_TARGET_DEFAULT
     max_runtime_seconds: int = 900
 
@@ -91,6 +95,17 @@ class InsightsAIRequest(BaseModel):
     budget_increase_value: float = 0.0
     market_overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
     focus_prompt: str = ""
+
+
+class ScenarioSummaryRequest(BaseModel):
+    selected_brand: str
+    scenario_id: str
+    revenue_uplift_pct: float = 0.0
+    total_new_spend: float = 0.0
+    target_budget: float = 0.0
+    markets: list[dict[str, Any]] = Field(default_factory=list)
+    state_change_rows: list[dict[str, Any]] = Field(default_factory=list)
+    user_prompt: str = ""
 
 
 def _stable_score(value: str) -> int:
@@ -569,6 +584,8 @@ def _optimize_revenue_allocation_with_brand_bounds(
     avg_prices: dict[str, float],
     effective_elasticities: dict[str, float],
     target_total: float,
+    brand_mins: dict[str, float] | None = None,
+    brand_maxs: dict[str, float] | None = None,
     max_change_pct: float = 0.25,
 ) -> tuple[dict[str, float], float, float, float]:
     brands = list(baselines.keys())
@@ -585,8 +602,19 @@ def _optimize_revenue_allocation_with_brand_bounds(
     else:
         shares = {b: w_raw[b] / wsum for b in brands}
 
-    mins = np.array([baselines[b] * (1.0 - max_change_pct) for b in brands], dtype=float)
-    maxs = np.array([baselines[b] * (1.0 + max_change_pct) for b in brands], dtype=float)
+    mins_arr: list[float] = []
+    maxs_arr: list[float] = []
+    for b in brands:
+        fallback_min = baselines[b] * (1.0 - max_change_pct)
+        fallback_max = baselines[b] * (1.0 + max_change_pct)
+        bmin = float(_finite((brand_mins or {}).get(b, fallback_min), fallback_min))
+        bmax = float(_finite((brand_maxs or {}).get(b, fallback_max), fallback_max))
+        bmin = max(0.0, bmin)
+        bmax = max(bmin, bmax)
+        mins_arr.append(bmin)
+        maxs_arr.append(bmax)
+    mins = np.array(mins_arr, dtype=float)
+    maxs = np.array(maxs_arr, dtype=float)
     feasible_min = float(np.sum(mins))
     feasible_max = float(np.sum(maxs))
     bounded_total = float(min(max(float(target_total), feasible_min), feasible_max))
@@ -661,6 +689,44 @@ def _optimize_revenue_allocation_with_brand_bounds(
     return out, bounded_total, feasible_min, feasible_max
 
 
+def _compute_brand_capacity_bounds(selected_brands: list[str]) -> dict[str, tuple[float, float]]:
+    """
+    Compute Step-1 brand min/max spend from market capacity bounds using all markets per brand.
+    """
+    out: dict[str, tuple[float, float]] = {}
+    for brand in selected_brands:
+        try:
+            ctx = _load_optimization_context(
+                OptimizeAutoRequest(
+                    selected_brand=brand,
+                    selected_markets=[],
+                    budget_increase_type="percentage",
+                    budget_increase_value=0.0,
+                    market_overrides={},
+                )
+            )
+        except Exception:
+            continue
+        limits_map: dict[str, dict[str, float | None]] = ctx.get("limits_map", {})
+        regions: list[str] = ctx.get("regions", [])
+        if not regions:
+            continue
+        brand_min = 0.0
+        brand_max = 0.0
+        for region in regions:
+            lim = limits_map.get(region, {})
+            min_tv = max(0.0, float(_finite(lim.get("min_tv_spend", 0.0), 0.0)))
+            min_dg = max(0.0, float(_finite(lim.get("min_digital_spend", 0.0), 0.0)))
+            max_tv_raw = float(_finite(lim.get("max_tv_spend", min_tv), min_tv))
+            max_dg_raw = float(_finite(lim.get("max_digital_spend", min_dg), min_dg))
+            max_tv = max(min_tv, max_tv_raw)
+            max_dg = max(min_dg, max_dg_raw)
+            brand_min += min_tv + min_dg
+            brand_max += max_tv + max_dg
+        out[brand] = (float(brand_min), float(brand_max))
+    return out
+
+
 def _brand_allocation_step1(payload: BrandAllocationRequest) -> dict[str, Any]:
     files = _detect_input_files()
     model_path = files["model_data"]
@@ -725,13 +791,26 @@ def _brand_allocation_step1(payload: BrandAllocationRequest) -> dict[str, Any]:
                 wsum = float(sum(raw_weights.values()))
             shares = {b: (raw_weights[b] / wsum) if wsum > 0 else (1.0 / len(selected)) for b in selected}
 
+    brand_capacity_bounds = _compute_brand_capacity_bounds(selected)
+    brand_mins: dict[str, float] = {}
+    brand_maxs: dict[str, float] = {}
+    for b in selected:
+        fallback_min = baselines[b] * 0.75
+        fallback_max = baselines[b] * 1.25
+        bmin, bmax = brand_capacity_bounds.get(b, (fallback_min, fallback_max))
+        bmin = max(0.0, float(_finite(bmin, fallback_min)))
+        bmax = max(bmin, float(_finite(bmax, fallback_max)))
+        brand_mins[b] = bmin
+        brand_maxs[b] = bmax
+
     allocations, target_total, feasible_min_total, feasible_max_total = _optimize_revenue_allocation_with_brand_bounds(
         baselines=baselines,
         baseline_volumes=baseline_volumes,
         avg_prices=avg_prices,
         effective_elasticities=effective_elasticities,
         target_total=target_total_requested,
-        max_change_pct=0.25,
+        brand_mins=brand_mins,
+        brand_maxs=brand_maxs,
     )
     rows: list[dict[str, Any]] = []
     baseline_total_volume = float(sum(_finite(baseline_volumes.get(b, 0.0), 0.0) for b in selected))
@@ -759,6 +838,24 @@ def _brand_allocation_step1(payload: BrandAllocationRequest) -> dict[str, Any]:
         rows.append({
             "brand": brand,
             "baseline_budget": round(baselines[brand], 2),
+            "min_allowed_budget": round(float(brand_mins.get(brand, baselines[brand] * 0.75)), 2),
+            "max_allowed_budget": round(float(brand_maxs.get(brand, baselines[brand] * 1.25)), 2),
+            "min_change_pct": round(
+                float(
+                    ((brand_mins.get(brand, baselines[brand] * 0.75) - baselines[brand]) / baselines[brand] * 100.0)
+                    if baselines[brand] > 1e-12
+                    else 0.0
+                ),
+                2,
+            ),
+            "max_change_pct": round(
+                float(
+                    ((brand_maxs.get(brand, baselines[brand] * 1.25) - baselines[brand]) / baselines[brand] * 100.0)
+                    if baselines[brand] > 1e-12
+                    else 0.0
+                ),
+                2,
+            ),
             "baseline_volume": round(baseline_volume, 2),
             "avg_price_last_3_points": round(avg_price, 6),
             "base_elasticity": round(float(base_elasticities[brand]), 6),
@@ -800,7 +897,7 @@ def _brand_allocation_step1(payload: BrandAllocationRequest) -> dict[str, Any]:
             "selected_brands": selected,
             "include_halo": payload.include_halo,
             "halo_scale": payload.halo_scale,
-            "per_brand_budget_change_limit_pct": 25.0,
+            "brand_bounds_mode": "market_capacity_derived",
         },
         "summary": {
             "baseline_total_budget": round(baseline_total, 2),
@@ -1388,6 +1485,73 @@ def _project_vector_to_budget(
     return None
 
 
+def _project_vector_to_budget_band(
+    vector: np.ndarray,
+    lower_budget: float,
+    upper_budget: float,
+    bounds: list[tuple[float, float]],
+    coeffs: np.ndarray,
+    baseline_budget: float,
+) -> np.ndarray | None:
+    """
+    Scenario-generation helper:
+    Projects candidate vector into variable bounds and then nudges spend into [lower_budget, upper_budget].
+    """
+    v = np.array(vector, dtype=float)
+    if len(v) != len(bounds):
+        return None
+    for i, (lo, hi) in enumerate(bounds):
+        v[i] = min(max(v[i], lo), hi)
+
+    low_target = float(min(lower_budget, upper_budget))
+    high_target = float(max(lower_budget, upper_budget))
+    eps = max(_budget_epsilon(low_target), _budget_epsilon(high_target))
+    curr = baseline_budget + float(np.dot(coeffs, v))
+    if (low_target - eps) <= curr <= (high_target + eps):
+        return v
+
+    # If above upper bound, spend must be reduced; if below lower bound, spend must be increased.
+    if curr > high_target:
+        diff = float(curr - high_target)
+        idx_order = np.argsort(coeffs)  # lower coeffs first for minimal distortion
+        for idx in idx_order:
+            c = float(coeffs[idx])
+            if abs(c) < 1e-12:
+                continue
+            lo, _ = bounds[idx]
+            room = v[idx] - lo
+            if room <= 1e-12:
+                continue
+            step = min(room, diff / c) if c > 0 else 0.0
+            if step > 0:
+                v[idx] -= step
+                diff -= c * step
+            if diff <= eps:
+                return v
+    else:
+        diff = float(low_target - curr)
+        idx_order = np.argsort(-coeffs)  # higher coeffs first to reach lower band faster
+        for idx in idx_order:
+            c = float(coeffs[idx])
+            if abs(c) < 1e-12:
+                continue
+            _, hi = bounds[idx]
+            room = hi - v[idx]
+            if room <= 1e-12:
+                continue
+            step = min(room, diff / c) if c > 0 else 0.0
+            if step > 0:
+                v[idx] += step
+                diff -= c * step
+            if diff <= eps:
+                return v
+
+    curr = baseline_budget + float(np.dot(coeffs, v))
+    if (low_target - eps) <= curr <= (high_target + eps):
+        return v
+    return None
+
+
 def _is_vector_feasible(
     vector: np.ndarray,
     target_budget: float,
@@ -1402,6 +1566,26 @@ def _is_vector_feasible(
             return False
     total_spend = baseline_budget + float(np.dot(coeffs, vector))
     return abs(total_spend - float(target_budget)) <= _budget_epsilon(target_budget)
+
+
+def _is_vector_feasible_in_budget_band(
+    vector: np.ndarray,
+    lower_budget: float,
+    upper_budget: float,
+    bounds: list[tuple[float, float]],
+    coeffs: np.ndarray,
+    baseline_budget: float,
+) -> bool:
+    if len(vector) != len(bounds):
+        return False
+    for i, (lo, hi) in enumerate(bounds):
+        if vector[i] < lo - 1e-9 or vector[i] > hi + 1e-9:
+            return False
+    total_spend = baseline_budget + float(np.dot(coeffs, vector))
+    low_target = float(min(lower_budget, upper_budget))
+    high_target = float(max(lower_budget, upper_budget))
+    eps = max(_budget_epsilon(low_target), _budget_epsilon(high_target))
+    return (low_target - eps) <= total_spend <= (high_target + eps)
 
 
 def _evaluate_solution_vector(
@@ -1698,6 +1882,13 @@ def _constraints_preview(payload: OptimizeAutoRequest) -> dict[str, Any]:
     limits_map = ctx["limits_map"]
     baseline_budget = float(ctx["baseline_budget"])
     target_budget = float(ctx["target_budget"])
+    bounds, coeffs, baseline_from_bounds = _build_variable_bounds_and_coeffs(market_data, regions, limits_map)
+    low_vector = np.array([lo for lo, _ in bounds], dtype=float)
+    high_vector = np.array([hi for _, hi in bounds], dtype=float)
+    feasible_min_budget = float(baseline_from_bounds + float(np.dot(coeffs, low_vector)))
+    feasible_max_budget = float(baseline_from_bounds + float(np.dot(coeffs, high_vector)))
+    adjusted_target_budget = float(min(max(target_budget, feasible_min_budget), feasible_max_budget))
+    target_within_feasible = abs(adjusted_target_budget - target_budget) <= _budget_epsilon(target_budget)
 
     rows: list[dict[str, Any]] = []
     total_spend = 0.0
@@ -1782,6 +1973,11 @@ def _constraints_preview(payload: OptimizeAutoRequest) -> dict[str, Any]:
             "weighted_digital_share": round((weighted_dg / total_spend) if total_spend > 0 else 0.0, 4),
             "baseline_budget": round(baseline_budget, 2),
             "optimized_budget": round(target_budget, 2),
+            "requested_target_budget": round(target_budget, 2),
+            "adjusted_target_budget": round(adjusted_target_budget, 2),
+            "target_within_feasible": bool(target_within_feasible),
+            "feasible_min_budget": round(feasible_min_budget, 2),
+            "feasible_max_budget": round(feasible_max_budget, 2),
             "budget_constraint_value": round(float(target_budget - total_spend), 6),
             "total_new_spend": round(total_spend, 2),
             "total_volume_uplift": 0.0,
@@ -2265,10 +2461,121 @@ def _build_yoy_growth_insights(payload: YoyGrowthRequest) -> dict[str, Any]:
 
 
 def _detect_volume_column(df: pd.DataFrame) -> str | None:
-    for col in ("Volume", "Sales_Qty_Total"):
+    for col in ("Volume", "Sales_Qty_Total", "Vol", "Filtered_Sales_Qty_Total", "Filtered_Secondary sales Qty(CS)", "Secondary sales Qty(CS)"):
         if col in df.columns:
             return col
     return None
+
+
+def _detect_price_column(df: pd.DataFrame) -> str | None:
+    for col in ("Price", "Avg_Price", "ASP"):
+        if col in df.columns:
+            return col
+    return None
+
+
+def _compute_revenue_series(df: pd.DataFrame) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=float)
+    vcol = _detect_volume_column(df)
+    pcol = _detect_price_column(df)
+    volume = pd.to_numeric(df[vcol], errors="coerce") if vcol else pd.Series(np.nan, index=df.index)
+    if pcol:
+        price = pd.to_numeric(df[pcol], errors="coerce")
+    elif "Sales" in df.columns and vcol:
+        num = pd.to_numeric(df["Sales"], errors="coerce")
+        den = pd.to_numeric(df[vcol], errors="coerce")
+        price = num / den.replace(0, np.nan)
+    elif "GSV_Total" in df.columns and vcol:
+        num = pd.to_numeric(df["GSV_Total"], errors="coerce")
+        den = pd.to_numeric(df[vcol], errors="coerce")
+        price = num / den.replace(0, np.nan)
+    else:
+        price = pd.Series(np.nan, index=df.index)
+
+    revenue = volume * price
+    if "Sales" in df.columns:
+        sales = pd.to_numeric(df["Sales"], errors="coerce")
+        revenue = revenue.where(np.isfinite(revenue), sales)
+    if "GSV_Total" in df.columns:
+        gsv = pd.to_numeric(df["GSV_Total"], errors="coerce")
+        revenue = revenue.where(np.isfinite(revenue), gsv)
+    revenue = revenue.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    revenue = revenue.clip(lower=0.0)
+    return revenue
+
+
+def _compute_market_salience_signals(
+    model_df: pd.DataFrame,
+    selected_brand: str,
+    regions: list[str],
+) -> dict[str, dict[str, Any]]:
+    if model_df.empty or not regions:
+        return {region: {} for region in regions}
+    if "Brand" not in model_df.columns or "Region" not in model_df.columns:
+        return {region: {} for region in regions}
+
+    work = model_df.copy()
+    work.columns = [str(c).strip() for c in work.columns]
+    work["Brand"] = work["Brand"].astype(str).str.strip()
+    work["Region"] = work["Region"].astype(str).str.strip()
+    work = work[work["Region"].isin([str(r).strip() for r in regions])].copy()
+    if work.empty:
+        return {region: {} for region in regions}
+
+    if "Fiscal Year" in work.columns and work["Fiscal Year"].notna().any():
+        fy_values = sorted(work["Fiscal Year"].dropna().astype(str).unique().tolist(), key=_fiscal_key)
+        if fy_values:
+            work = work[work["Fiscal Year"].astype(str) == fy_values[-1]].copy()
+
+    work["_revenue"] = _compute_revenue_series(work)
+    grouped = work.groupby(["Region", "Brand"], as_index=False)["_revenue"].sum()
+    if grouped.empty:
+        return {region: {} for region in regions}
+
+    selected_brand_revenue_by_region: dict[str, float] = {}
+    region_total_revenue: dict[str, float] = {}
+    leader_brand_by_region: dict[str, str] = {}
+    leader_rank_by_region: dict[str, int] = {}
+    market_share_by_region: dict[str, float] = {}
+
+    for region in regions:
+        reg = str(region).strip()
+        rg = grouped[grouped["Region"] == reg].copy()
+        rg = rg.sort_values(["_revenue", "Brand"], ascending=[False, True]).reset_index(drop=True)
+        total_rev = float(_finite(rg["_revenue"].sum(), 0.0))
+        region_total_revenue[reg] = max(0.0, total_rev)
+        leader_brand_by_region[reg] = str(rg.iloc[0]["Brand"]) if len(rg) > 0 else ""
+
+        brand_rev = float(_finite(rg.loc[rg["Brand"] == selected_brand, "_revenue"].sum(), 0.0))
+        selected_brand_revenue_by_region[reg] = max(0.0, brand_rev)
+        market_share_by_region[reg] = (brand_rev / total_rev * 100.0) if total_rev > 1e-12 else 0.0
+
+        rank = len(rg) + 1
+        if len(rg) > 0:
+            match = rg[rg["Brand"] == selected_brand]
+            if not match.empty:
+                rank = int(match.index[0]) + 1
+        leader_rank_by_region[reg] = rank
+
+    total_selected_brand_revenue = float(sum(selected_brand_revenue_by_region.values()))
+    out: dict[str, dict[str, Any]] = {}
+    for region in regions:
+        reg = str(region).strip()
+        brand_rev = float(_finite(selected_brand_revenue_by_region.get(reg, 0.0), 0.0))
+        salience = (brand_rev / total_selected_brand_revenue * 100.0) if total_selected_brand_revenue > 1e-12 else 0.0
+        rank = int(_finite(leader_rank_by_region.get(reg, 0), 0))
+        out[reg] = {
+            "category_salience_pct": round(float(salience), 2),
+            "brand_market_share_pct": round(float(_finite(market_share_by_region.get(reg, 0.0), 0.0)), 2),
+            "leader_rank": rank,
+            "leader_position": "Leader" if rank == 1 else f"Rank {rank}",
+            "leader_brand": str(leader_brand_by_region.get(reg, "")),
+            "is_market_leader": bool(rank == 1),
+            "brand_revenue": round(brand_rev, 2),
+            "region_total_revenue": round(float(_finite(region_total_revenue.get(reg, 0.0), 0.0)), 2),
+        }
+    return out
 
 
 def _region_latest_yoy_from_raw(model_df: pd.DataFrame, brand: str, region: str) -> dict[str, Any]:
@@ -2344,7 +2651,138 @@ def _compact_market_for_ai(row: dict[str, Any]) -> dict[str, Any]:
         "headroom_pct": round(float(_finite(row.get("headroom_pct", 0.0), 0.0)), 2),
         "tv_share_pct": round(float(_finite(row.get("tv_share_pct", 0.0), 0.0)), 2),
         "digital_share_pct": round(float(_finite(row.get("digital_share_pct", 0.0), 0.0)), 2),
+        "category_salience_pct": round(float(_finite(row.get("category_salience_pct", 0.0), 0.0)), 2),
+        "brand_market_share_pct": round(float(_finite(row.get("brand_market_share_pct", 0.0), 0.0)), 2),
+        "leader_position": str(row.get("leader_position", "")),
+        "media_responsiveness_pct": round(float(_finite(row.get("media_responsiveness_pct", 0.0), 0.0)), 2),
+        "investment_quadrant": str(row.get("investment_quadrant", "")),
         "action": str(row.get("recommendation_action", "Hold and optimize mix")),
+    }
+
+
+def _build_trinity_signal_snapshot(focus_prompt: str) -> dict[str, Any]:
+    parsed_focus = _extract_json_object(focus_prompt or "")
+    if not isinstance(parsed_focus, dict):
+        return {
+            "insights_brand": "",
+            "insights_market": "",
+            "yoy": {"latest_fiscal_year": "", "latest_yoy_growth_pct": 0.0, "latest_volume_mn": 0.0},
+            "s_curve": {
+                "tv_points": 0,
+                "digital_points": 0,
+                "tv_first_uplift_pct": 0.0,
+                "tv_last_uplift_pct": 0.0,
+                "dg_first_uplift_pct": 0.0,
+                "dg_last_uplift_pct": 0.0,
+            },
+            "contribution_top": [],
+        }
+
+    s_curve_raw = parsed_focus.get("s_curve", {})
+    yoy_raw = parsed_focus.get("yoy", {})
+    contribution_raw = parsed_focus.get("contribution_top", [])
+    s_curve = s_curve_raw if isinstance(s_curve_raw, dict) else {}
+    yoy = yoy_raw if isinstance(yoy_raw, dict) else {}
+
+    contribution_top: list[dict[str, Any]] = []
+    if isinstance(contribution_raw, list):
+        for item in contribution_raw[:6]:
+            if not isinstance(item, dict):
+                continue
+            variable = _clip_text(str(item.get("variable", "")).strip(), 80)
+            if not variable:
+                continue
+            contribution_top.append(
+                {
+                    "variable": variable,
+                    "abs": float(_finite(item.get("abs", 0.0), 0.0)),
+                    "share_pct": float(_finite(item.get("share_pct", 0.0), 0.0)),
+                }
+            )
+
+    return {
+        "insights_brand": _clip_text(str(parsed_focus.get("insights_brand", "")).strip(), 40),
+        "insights_market": _clip_text(str(parsed_focus.get("insights_market", "")).strip(), 40),
+        "yoy": {
+            "latest_fiscal_year": _clip_text(str(yoy.get("latest_fiscal_year", "")).strip(), 20),
+            "latest_yoy_growth_pct": float(_finite(yoy.get("latest_yoy_growth_pct", 0.0), 0.0)),
+            "latest_volume_mn": float(_finite(yoy.get("latest_volume_mn", 0.0), 0.0)),
+        },
+        "s_curve": {
+            "tv_points": int(_finite(s_curve.get("tv_points", 0), 0)),
+            "digital_points": int(_finite(s_curve.get("digital_points", 0), 0)),
+            "tv_first_uplift_pct": float(_finite(s_curve.get("tv_first_uplift_pct", 0.0), 0.0)),
+            "tv_last_uplift_pct": float(_finite(s_curve.get("tv_last_uplift_pct", 0.0), 0.0)),
+            "dg_first_uplift_pct": float(_finite(s_curve.get("dg_first_uplift_pct", 0.0), 0.0)),
+            "dg_last_uplift_pct": float(_finite(s_curve.get("dg_last_uplift_pct", 0.0), 0.0)),
+        },
+        "contribution_top": contribution_top,
+    }
+
+
+def _build_trinity_portfolio_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "avg_yoy_growth_pct": 0.0,
+            "median_yoy_growth_pct": 0.0,
+            "positive_yoy_states": 0,
+            "negative_yoy_states": 0,
+            "median_headroom_pct": 0.0,
+            "avg_tv_effectiveness_pct": 0.0,
+            "avg_digital_effectiveness_pct": 0.0,
+            "tv_effective_states": 0,
+            "digital_effective_states": 0,
+            "avg_category_salience_pct": 0.0,
+            "market_leader_states": 0,
+            "top_opportunity_states": [],
+            "top_risk_states": [],
+        }
+
+    yoy_vals = np.array([float(_finite(r.get("yoy_growth_pct", 0.0), 0.0)) for r in rows], dtype=float)
+    head_vals = np.array([float(_finite(r.get("headroom_pct", 0.0), 0.0)) for r in rows], dtype=float)
+    tv_eff_vals = np.array([float(_finite(r.get("tv_effectiveness_pct", 0.0), 0.0)) for r in rows], dtype=float)
+    dg_eff_vals = np.array([float(_finite(r.get("digital_effectiveness_pct", 0.0), 0.0)) for r in rows], dtype=float)
+    salience_vals = np.array([float(_finite(r.get("category_salience_pct", 0.0), 0.0)) for r in rows], dtype=float)
+
+    def _opp_score(r: dict[str, Any]) -> float:
+        yoy = float(_finite(r.get("yoy_growth_pct", 0.0), 0.0))
+        head = float(_finite(r.get("headroom_pct", 0.0), 0.0))
+        tv_eff = float(_finite(r.get("tv_effectiveness_pct", 0.0), 0.0))
+        dg_eff = float(_finite(r.get("digital_effectiveness_pct", 0.0), 0.0))
+        return yoy * 0.45 + head * 0.35 + ((tv_eff + dg_eff) / 2.0) * 0.20
+
+    def _risk_score(r: dict[str, Any]) -> float:
+        yoy = float(_finite(r.get("yoy_growth_pct", 0.0), 0.0))
+        head = float(_finite(r.get("headroom_pct", 0.0), 0.0))
+        tv_eff = float(_finite(r.get("tv_effectiveness_pct", 0.0), 0.0))
+        dg_eff = float(_finite(r.get("digital_effectiveness_pct", 0.0), 0.0))
+        return (-yoy) * 0.50 + (100.0 - head) * 0.20 + (100.0 - ((tv_eff + dg_eff) / 2.0)) * 0.30
+
+    top_opportunity_states = [
+        str(r.get("market", ""))
+        for r in sorted(rows, key=_opp_score, reverse=True)
+        if str(r.get("market", ""))
+    ][:6]
+    top_risk_states = [
+        str(r.get("market", ""))
+        for r in sorted(rows, key=_risk_score, reverse=True)
+        if str(r.get("market", ""))
+    ][:6]
+
+    return {
+        "avg_yoy_growth_pct": round(float(np.mean(yoy_vals)) if yoy_vals.size else 0.0, 2),
+        "median_yoy_growth_pct": round(float(np.median(yoy_vals)) if yoy_vals.size else 0.0, 2),
+        "positive_yoy_states": int(np.sum(yoy_vals >= 0.0)),
+        "negative_yoy_states": int(np.sum(yoy_vals < 0.0)),
+        "median_headroom_pct": round(float(np.median(head_vals)) if head_vals.size else 0.0, 2),
+        "avg_tv_effectiveness_pct": round(float(np.mean(tv_eff_vals)) if tv_eff_vals.size else 0.0, 2),
+        "avg_digital_effectiveness_pct": round(float(np.mean(dg_eff_vals)) if dg_eff_vals.size else 0.0, 2),
+        "tv_effective_states": int(sum(1 for r in rows if str(r.get("tv_zone", "")) == "effective")),
+        "digital_effective_states": int(sum(1 for r in rows if str(r.get("digital_zone", "")) == "effective")),
+        "avg_category_salience_pct": round(float(np.mean(salience_vals)) if salience_vals.size else 0.0, 2),
+        "market_leader_states": int(sum(1 for r in rows if bool(r.get("is_market_leader", False)))),
+        "top_opportunity_states": top_opportunity_states,
+        "top_risk_states": top_risk_states,
     }
 
 
@@ -2356,16 +2794,8 @@ def _build_ai_insights_prompt(
     recovery: list[str],
     focus_prompt: str,
 ) -> str:
-    parsed_focus = _extract_json_object(focus_prompt)
-    if isinstance(parsed_focus, dict):
-        compact_focus: dict[str, Any] = {
-            "insights_brand": _clip_text(str(parsed_focus.get("insights_brand", "")), 40),
-            "insights_market": _clip_text(str(parsed_focus.get("insights_market", "")), 40),
-            "s_curve": parsed_focus.get("s_curve", {}),
-            "contribution_top": parsed_focus.get("contribution_top", []),
-            "yoy": parsed_focus.get("yoy", {}),
-        }
-    else:
+    compact_focus = _build_trinity_signal_snapshot(focus_prompt)
+    if not compact_focus.get("insights_brand") and not compact_focus.get("insights_market"):
         compact_focus = {"user_note": _clip_text(focus_prompt, 220)}
 
     if not rows:
@@ -2422,6 +2852,7 @@ def _build_ai_insights_prompt(
         "Rules:\n"
         "- No markdown. No prose outside JSON.\n"
         "- Use only states present in DATA.\n"
+        "- Use category_salience_pct, brand_market_share_pct, leader_position, and investment_quadrant while recommending increase/decrease.\n"
         "- `increase_markets` and `decrease_markets` should be distinct state sets where possible.\n"
         "- Max 6 entries per market list.\n"
         "- `portfolio_takeaway` should be analytical and not a copy of list items.\n"
@@ -2893,27 +3324,118 @@ def _finalize_ai_structured(
 
     inc = out.get("where_to_increase", [])
     red = out.get("where_to_protect_reduce", [])
+    leader_set = {x.lower() for x in leaders}
+
+    def _opp_score(r: dict[str, Any]) -> float:
+        yoy = float(_finite(r.get("yoy_growth_pct", 0.0), 0.0))
+        head = float(_finite(r.get("headroom_pct", 0.0), 0.0))
+        tv_eff = float(_finite(r.get("tv_effectiveness_pct", 0.0), 0.0))
+        dg_eff = float(_finite(r.get("digital_effectiveness_pct", 0.0), 0.0))
+        tv_zone = str(r.get("tv_zone", "")).lower()
+        dg_zone = str(r.get("digital_zone", "")).lower()
+        zone_bonus = 0.0
+        if tv_zone == "under-utilized":
+            zone_bonus += 4.0
+        if dg_zone == "under-utilized":
+            zone_bonus += 4.0
+        if str(r.get("market", "")).lower() in leader_set:
+            zone_bonus += 3.0
+        return yoy * 0.45 + head * 0.35 + ((tv_eff + dg_eff) / 2.0) * 0.20 + zone_bonus
+
+    def _risk_score(r: dict[str, Any]) -> float:
+        yoy = float(_finite(r.get("yoy_growth_pct", 0.0), 0.0))
+        head = float(_finite(r.get("headroom_pct", 0.0), 0.0))
+        tv_eff = float(_finite(r.get("tv_effectiveness_pct", 0.0), 0.0))
+        dg_eff = float(_finite(r.get("digital_effectiveness_pct", 0.0), 0.0))
+        tv_zone = str(r.get("tv_zone", "")).lower()
+        dg_zone = str(r.get("digital_zone", "")).lower()
+        sat_penalty = 0.0
+        if tv_zone == "saturated":
+            sat_penalty += 7.0
+        if dg_zone == "saturated":
+            sat_penalty += 7.0
+        return (-yoy) * 0.50 + (100.0 - head) * 0.20 + (100.0 - ((tv_eff + dg_eff) / 2.0)) * 0.30 + sat_penalty
+
+    def _inc_action(r: dict[str, Any]) -> str:
+        tv_zone = str(r.get("tv_zone", "")).lower()
+        dg_zone = str(r.get("digital_zone", "")).lower()
+        if tv_zone == "under-utilized" and dg_zone != "under-utilized":
+            return "Increase TV in a controlled range while holding Digital."
+        if dg_zone == "under-utilized" and tv_zone != "under-utilized":
+            return "Increase Digital in a controlled range while holding TV."
+        if tv_zone == "under-utilized" and dg_zone == "under-utilized":
+            return "Increase both TV and Digital gradually; keep guardrails on spend."
+        return "Increase spend selectively with balanced TV-Digital mix optimization."
+
+    def _red_action(r: dict[str, Any]) -> str:
+        tv_zone = str(r.get("tv_zone", "")).lower()
+        dg_zone = str(r.get("digital_zone", "")).lower()
+        if tv_zone == "saturated" and dg_zone != "saturated":
+            return "Protect TV spend and rebalance toward higher-efficiency Digital."
+        if dg_zone == "saturated" and tv_zone != "saturated":
+            return "Protect Digital spend and rebalance toward higher-efficiency TV."
+        if tv_zone == "saturated" and dg_zone == "saturated":
+            return "Protect total spend and correct both channel mixes before scaling."
+        return "Protect spend and optimize channel mix before incremental investment."
+
     if not isinstance(inc, list) or len(inc) == 0:
-        top_inc = [r for r in rows if str(r.get("recommendation_action", "")).startswith("Increase")]
-        top_inc = sorted(top_inc, key=lambda r: float(r.get("headroom_pct", 0.0)), reverse=True)[:4]
+        inc_target = min(4, max(2, int(math.ceil(max(1, len(rows)) * 0.5))))
+        inc_candidates = sorted(rows, key=_opp_score, reverse=True)
+        chosen_inc: list[dict[str, Any]] = []
+        for r in inc_candidates:
+            yoy = float(_finite(r.get("yoy_growth_pct", 0.0), 0.0))
+            head = float(_finite(r.get("headroom_pct", 0.0), 0.0))
+            if yoy >= 0.0 or head >= 20.0:
+                chosen_inc.append(r)
+            if len(chosen_inc) >= inc_target:
+                break
+        if not chosen_inc:
+            chosen_inc = inc_candidates[:inc_target]
         inc = [
             {
                 "state": _clip_text(str(r.get("market", "N/A")), 40),
-                "why": "High headroom with positive momentum.",
-                "action": "Increase spend in a controlled range.",
+                "why": (
+                    f"YoY {float(_finite(r.get('yoy_growth_pct', 0.0), 0.0)):.1f}%, "
+                    f"headroom {float(_finite(r.get('headroom_pct', 0.0), 0.0)):.1f}%, "
+                    f"TV {str(r.get('tv_zone', ''))}, Digital {str(r.get('digital_zone', ''))}."
+                ),
+                "action": _inc_action(r),
             }
-            for r in top_inc
+            for r in chosen_inc
         ]
+
     if not isinstance(red, list) or len(red) == 0:
-        top_red = [r for r in rows if str(r.get("recommendation_action", "")).startswith("Reduce")]
-        top_red = sorted(top_red, key=lambda r: float(r.get("headroom_pct", 0.0)))[:4]
+        inc_states = {str(x.get("state", "")).strip().lower() for x in inc if isinstance(x, dict)}
+        red_target = min(4, max(1, len(rows) - len(inc_states)))
+        red_candidates = [r for r in sorted(rows, key=_risk_score, reverse=True) if str(r.get("market", "")).strip().lower() not in inc_states]
+        chosen_red: list[dict[str, Any]] = []
+        for r in red_candidates:
+            yoy = float(_finite(r.get("yoy_growth_pct", 0.0), 0.0))
+            avg_eff = (
+                float(_finite(r.get("tv_effectiveness_pct", 0.0), 0.0))
+                + float(_finite(r.get("digital_effectiveness_pct", 0.0), 0.0))
+            ) / 2.0
+            tv_zone = str(r.get("tv_zone", "")).lower()
+            dg_zone = str(r.get("digital_zone", "")).lower()
+            if yoy < 0.0 or avg_eff < 45.0 or tv_zone == "saturated" or dg_zone == "saturated":
+                chosen_red.append(r)
+            if len(chosen_red) >= red_target:
+                break
+        if not chosen_red:
+            chosen_red = red_candidates[:red_target]
+        if not chosen_red and rows:
+            chosen_red = sorted(rows, key=_risk_score, reverse=True)[:red_target]
         red = [
             {
                 "state": _clip_text(str(r.get("market", "N/A")), 40),
-                "why": "Low headroom and/or negative momentum risk.",
-                "action": "Protect spend and optimize channel mix.",
+                "why": (
+                    f"YoY {float(_finite(r.get('yoy_growth_pct', 0.0), 0.0)):.1f}%, "
+                    f"headroom {float(_finite(r.get('headroom_pct', 0.0), 0.0)):.1f}%, "
+                    f"TV {str(r.get('tv_zone', ''))}, Digital {str(r.get('digital_zone', ''))}."
+                ),
+                "action": _red_action(r),
             }
-            for r in top_red
+            for r in chosen_red
         ]
     out["where_to_increase"] = _normalize_ai_action_list(inc)
     out["where_to_protect_reduce"] = _normalize_ai_action_list(red)
@@ -3112,6 +3634,8 @@ def _build_ai_insights_summary(payload: InsightsAIRequest) -> dict[str, Any]:
     limits_map: dict[str, dict[str, float | None]] = ctx["limits_map"]
     model_df: pd.DataFrame = ctx["model_df"].copy()
     model_df.columns = [str(c).strip() for c in model_df.columns]
+    signal_snapshot = _build_trinity_signal_snapshot(str(payload.focus_prompt or "").strip())
+    salience_signals = _compute_market_salience_signals(model_df=model_df, selected_brand=brand, regions=ctx["regions"])
 
     def _channel_zone(position_pct: float) -> str:
         if position_pct < 35.0:
@@ -3186,6 +3710,73 @@ def _build_ai_insights_summary(payload: InsightsAIRequest) -> dict[str, Any]:
             }
         )
 
+    salience_vals = np.array(
+        [float(_finite(salience_signals.get(str(r.get("market")), {}).get("category_salience_pct", 0.0), 0.0)) for r in rows],
+        dtype=float,
+    )
+    responsiveness_vals = np.array(
+        [float((_finite(r.get("tv_effectiveness_pct", 0.0), 0.0) + _finite(r.get("digital_effectiveness_pct", 0.0), 0.0)) / 2.0) for r in rows],
+        dtype=float,
+    )
+    salience_mid = float(np.percentile(salience_vals, 50)) if salience_vals.size > 0 else 0.0
+    responsiveness_mid = float(np.percentile(responsiveness_vals, 50)) if responsiveness_vals.size > 0 else 0.0
+
+    framework_counts = {
+        "increase_media_investments": 0,
+        "maintain_high_salience": 0,
+        "maintain_selective": 0,
+        "scale_back": 0,
+    }
+    for row in rows:
+        market = str(row.get("market", ""))
+        sig = salience_signals.get(market, {})
+        category_salience_pct = float(_finite(sig.get("category_salience_pct", 0.0), 0.0))
+        brand_market_share_pct = float(_finite(sig.get("brand_market_share_pct", 0.0), 0.0))
+        leader_rank = int(_finite(sig.get("leader_rank", 0), 0))
+        is_market_leader = bool(sig.get("is_market_leader", False))
+        leader_position = str(sig.get("leader_position", f"Rank {leader_rank}" if leader_rank > 0 else "Unranked"))
+        leader_brand = str(sig.get("leader_brand", ""))
+        brand_revenue = float(_finite(sig.get("brand_revenue", 0.0), 0.0))
+        region_total_revenue = float(_finite(sig.get("region_total_revenue", 0.0), 0.0))
+
+        media_responsiveness_pct = float(
+            (_finite(row.get("tv_effectiveness_pct", 0.0), 0.0) + _finite(row.get("digital_effectiveness_pct", 0.0), 0.0))
+            / 2.0
+        )
+        high_salience = category_salience_pct >= salience_mid
+        high_responsiveness = media_responsiveness_pct >= responsiveness_mid
+
+        if high_salience and high_responsiveness:
+            investment_quadrant = "increase_media_investments"
+            row_action = (
+                "Increase media investments to maximum-impact range and build category growth."
+                if not is_market_leader
+                else "Increase media investments to defend leadership and expand category."
+            )
+        elif high_salience and (not high_responsiveness):
+            investment_quadrant = "maintain_high_salience"
+            row_action = "Maintain spend in this high-salience market; improve conversion quality before scaling."
+        elif (not high_salience) and high_responsiveness:
+            investment_quadrant = "maintain_selective"
+            row_action = "Maintain selective investments; prioritize efficient bursts over broad scaling."
+        else:
+            investment_quadrant = "scale_back"
+            row_action = "Scale back to minimum effective level and re-allocate funds to stronger markets."
+
+        framework_counts[investment_quadrant] += 1
+
+        row["category_salience_pct"] = round(category_salience_pct, 2)
+        row["brand_market_share_pct"] = round(brand_market_share_pct, 2)
+        row["leader_rank"] = leader_rank
+        row["leader_position"] = leader_position
+        row["leader_brand"] = leader_brand
+        row["is_market_leader"] = is_market_leader
+        row["brand_revenue"] = round(brand_revenue, 2)
+        row["region_total_revenue"] = round(region_total_revenue, 2)
+        row["media_responsiveness_pct"] = round(media_responsiveness_pct, 2)
+        row["investment_quadrant"] = investment_quadrant
+        row["recommendation_action"] = row_action
+
     yoy_vals = np.array([float(r["yoy_growth_pct"]) for r in rows], dtype=float)
     head_vals = np.array([float(r["headroom_pct"]) for r in rows], dtype=float)
     q_hi = float(np.percentile(yoy_vals, 67)) if len(yoy_vals) > 0 else 0.0
@@ -3227,6 +3818,7 @@ def _build_ai_insights_summary(payload: InsightsAIRequest) -> dict[str, Any]:
         [r for r in rows if str(r.get("digital_zone")) != "effective" or float(r.get("yoy_growth_pct", 0.0)) < 0.0],
         key=lambda r: (float(r.get("digital_effectiveness_pct", 0.0)), float(r.get("yoy_growth_pct", 0.0))),
     )
+    portfolio_metrics = _build_trinity_portfolio_metrics(rows)
     computed_executive_summary = _build_exec_summary_insight(rows=rows, brand=brand)
 
     prompt = _build_ai_insights_prompt(
@@ -3298,6 +3890,18 @@ def _build_ai_insights_summary(payload: InsightsAIRequest) -> dict[str, Any]:
         ai_text = _format_ai_insights_structured_text(ai_structured)
         provider = "fallback"
 
+    if ai_structured is not None:
+        ai_structured = _finalize_ai_structured(
+            data=ai_structured,
+            leaders=leaders,
+            core=core,
+            recovery=recovery,
+            rows=rows,
+            brand=brand,
+        )
+        ai_summary_json = ai_structured.get("summary_json") if isinstance(ai_structured.get("summary_json"), dict) else None
+        ai_text = _format_ai_insights_structured_text(ai_structured)
+
     rows_sorted = sorted(rows, key=lambda r: (float(r["yoy_growth_pct"]), float(r["headroom_pct"])), reverse=True)
     return {
         "status": "ok",
@@ -3312,6 +3916,13 @@ def _build_ai_insights_summary(payload: InsightsAIRequest) -> dict[str, Any]:
             "leaders_count": len(leaders),
             "core_count": len(core),
             "recovery_count": len(recovery),
+        },
+        "signal_snapshot": signal_snapshot,
+        "portfolio_metrics": portfolio_metrics,
+        "investment_framework": {
+            "salience_threshold_pct": round(float(salience_mid), 2),
+            "responsiveness_threshold_pct": round(float(responsiveness_mid), 2),
+            "quadrant_counts": framework_counts,
         },
         "analysis_basis": {
             "primary_metric": "YoY growth is computed as latest fiscal year volume vs previous fiscal year.",
@@ -3347,6 +3958,7 @@ def _default_strategy_controls() -> dict[str, Any]:
         "pace_preference": "steady",
         "coverage_preference": "broad",
         "diversity_preference": "medium",
+        "budget_zone_preference": "mixed",
     }
 
 
@@ -3404,17 +4016,21 @@ def _sanitize_strategy_controls(raw: dict[str, Any] | None) -> dict[str, Any]:
     pace = str(raw.get("pace_preference", default["pace_preference"])).strip().lower()
     coverage = str(raw.get("coverage_preference", default["coverage_preference"])).strip().lower()
     diversity = str(raw.get("diversity_preference", default["diversity_preference"])).strip().lower()
+    budget_zone = str(raw.get("budget_zone_preference", default["budget_zone_preference"])).strip().lower()
     if pace not in {"steady", "fast"}:
         pace = default["pace_preference"]
     if coverage not in {"few", "broad"}:
         coverage = default["coverage_preference"]
     if diversity not in {"low", "medium", "high"}:
         diversity = default["diversity_preference"]
+    if budget_zone not in {"low", "mid", "high", "mixed"}:
+        budget_zone = default["budget_zone_preference"]
     return {
         "family_mix_weights": _normalize_family_weights(raw.get("family_mix_weights")),
         "pace_preference": pace,
         "coverage_preference": coverage,
         "diversity_preference": diversity,
+        "budget_zone_preference": budget_zone,
     }
 
 
@@ -3430,7 +4046,8 @@ def _call_gemini_for_strategy(intent_prompt: str, constraints_context: dict[str,
         "You are a strategy translator for marketing scenario generation.\n"
         "Return strict JSON only with keys:\n"
         "family_mix_weights (volume/revenue/balanced numbers in [0,1]), "
-        "pace_preference (steady|fast), coverage_preference (few|broad), diversity_preference (low|medium|high).\n"
+        "pace_preference (steady|fast), coverage_preference (few|broad), diversity_preference (low|medium|high), "
+        "budget_zone_preference (low|mid|high|mixed).\n"
         "Do not return scenario values.\n"
         f"Intent: {intent_prompt}\n"
         f"Constraint context: {json.dumps(constraints_context)}\n"
@@ -3526,10 +4143,13 @@ def _vector_key(v: np.ndarray) -> tuple[float, ...]:
     return tuple(float(round(x, 6)) for x in v.tolist())
 
 
-def _derive_sampling_params(strategy: dict[str, Any]) -> dict[str, float]:
+def _derive_sampling_params(strategy: dict[str, Any]) -> dict[str, Any]:
     pace = strategy.get("pace_preference", "steady")
     coverage = strategy.get("coverage_preference", "broad")
     diversity = strategy.get("diversity_preference", "medium")
+    budget_zone = str(strategy.get("budget_zone_preference", "mixed")).strip().lower()
+    if budget_zone not in {"low", "mid", "high", "mixed"}:
+        budget_zone = "mixed"
     near_sigma = 0.04 if pace == "steady" else 0.08
     broad_sigma = 0.20 if pace == "steady" else 0.35
     active_fraction = 1.0 if coverage == "broad" else 0.35
@@ -3539,7 +4159,51 @@ def _derive_sampling_params(strategy: dict[str, Any]) -> dict[str, float]:
         "broad_sigma": broad_sigma,
         "active_fraction": active_fraction,
         "min_distance": SCENARIO_DEFAULT_MIN_DISTANCE * distance_scale,
+        "budget_zone_preference": budget_zone,
     }
+
+
+def _sample_budget_target_in_band(
+    lower_budget: float,
+    upper_budget: float,
+    budget_zone_preference: str,
+    near_opt: bool,
+    rng: random.Random,
+) -> float:
+    lower = float(min(lower_budget, upper_budget))
+    upper = float(max(lower_budget, upper_budget))
+    if upper - lower <= max(_budget_epsilon(upper), 1e-6):
+        return upper
+    span = upper - lower
+    third = span / 3.0
+    zone = str(budget_zone_preference or "mixed").strip().lower()
+    if zone not in {"low", "mid", "high", "mixed"}:
+        zone = "mixed"
+
+    if zone == "low":
+        zone_lo, zone_hi = lower, lower + third
+    elif zone == "mid":
+        zone_lo, zone_hi = lower + third, lower + 2.0 * third
+    elif zone == "high":
+        zone_lo, zone_hi = lower + 2.0 * third, upper
+    else:
+        zone_lo, zone_hi = lower, upper
+
+    zone_lo = max(lower, min(zone_lo, upper))
+    zone_hi = max(zone_lo, min(zone_hi, upper))
+
+    if near_opt:
+        if zone == "mixed":
+            hi_bias_lo = max(lower, upper - 0.2 * span)
+            return float(rng.uniform(hi_bias_lo, upper))
+        return float(rng.uniform(zone_lo, zone_hi))
+
+    if zone == "mixed":
+        return float(rng.uniform(lower, upper))
+
+    if rng.random() < 0.7:
+        return float(rng.uniform(zone_lo, zone_hi))
+    return float(rng.uniform(lower, upper))
 
 
 def _sample_family(weights: dict[str, float], rng: random.Random) -> str:
@@ -3557,7 +4221,7 @@ def _sample_candidate_vector(
     near_opt: bool,
     bounds: list[tuple[float, float]],
     regions: list[str],
-    params: dict[str, float],
+    params: dict[str, Any],
     rng: random.Random,
 ) -> np.ndarray:
     v = np.array(center, dtype=float)
@@ -3708,6 +4372,8 @@ def _generate_scenarios_for_context(
     set_progress: Any,
     target_total_requested: int,
     max_runtime_seconds: int,
+    requested_scenario_budget_lower: float | None = None,
+    requested_scenario_budget_upper: float | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Use-case note for AI review:
@@ -3718,17 +4384,52 @@ def _generate_scenarios_for_context(
     regions = ctx["regions"]
     market_data = ctx["market_data"]
     limits_map = ctx["limits_map"]
-    target_budget = float(ctx["target_budget"])
     region_prices = _compute_region_prices_last_3_months(ctx["model_df"], ctx["brand"], regions)
     bounds, coeffs, baseline_budget = _build_variable_bounds_and_coeffs(market_data, regions, limits_map)
-    rng = random.Random(_stable_score(f"{ctx['brand']}|{','.join(regions)}|{target_budget}"))
+    requested_target_budget = float(ctx["target_budget"])
+    low_vector = np.array([lo for lo, _ in bounds], dtype=float)
+    high_vector = np.array([hi for _, hi in bounds], dtype=float)
+    feasible_budget_min = float(baseline_budget + float(np.dot(coeffs, low_vector)))
+    feasible_budget_max = float(baseline_budget + float(np.dot(coeffs, high_vector)))
+    target_budget = float(min(max(requested_target_budget, feasible_budget_min), feasible_budget_max))
+    fallback_lower = float(max(feasible_budget_min, target_budget * SCENARIO_BUDGET_BAND_LOWER_RATIO))
+    requested_band_upper = float(
+        _finite(requested_scenario_budget_upper, target_budget)
+        if requested_scenario_budget_upper is not None
+        else target_budget
+    )
+    requested_band_lower = float(
+        _finite(requested_scenario_budget_lower, fallback_lower)
+        if requested_scenario_budget_lower is not None
+        else fallback_lower
+    )
+    if requested_band_upper <= 0:
+        requested_band_upper = target_budget
+    if requested_band_lower < 0:
+        requested_band_lower = 0.0
+    if requested_band_lower > requested_band_upper:
+        requested_band_lower, requested_band_upper = requested_band_upper, requested_band_lower
+
+    scenario_budget_upper = float(min(max(requested_band_upper, feasible_budget_min), feasible_budget_max))
+    scenario_budget_lower = float(max(requested_band_lower, feasible_budget_min))
+    if scenario_budget_lower > scenario_budget_upper:
+        scenario_budget_lower = scenario_budget_upper
+
+    seed_budget = float(scenario_budget_upper)
+    budget_adjust_note: str | None = None
+    if abs(target_budget - requested_target_budget) > _budget_epsilon(requested_target_budget):
+        budget_adjust_note = (
+            "Requested target budget was outside feasible bounds for current market constraints. "
+            f"Adjusted from {round(requested_target_budget, 2)} to {round(target_budget, 2)}."
+        )
+    rng = random.Random(_stable_score(f"{ctx['brand']}|{','.join(regions)}|{seed_budget}|{scenario_budget_lower}|{scenario_budget_upper}"))
 
     set_progress(20, "Computing deterministic seed scenarios...")
-    volume_seed, _ = _run_solver(market_data, regions, target_budget, limits_map)
+    volume_seed, _ = _run_solver(market_data, regions, seed_budget, limits_map)
     revenue_seed, _ = _run_solver_with_objective(
         market_data=market_data,
         regions=regions,
-        B=target_budget,
+        B=seed_budget,
         limits_map=limits_map,
         objective_fn=_objective_revenue,
         objective_args=(region_prices,),
@@ -3755,13 +4456,60 @@ def _generate_scenarios_for_context(
     near_count = 0
     attempts = 0
     notes: list[str] = []
+    if budget_adjust_note:
+        notes.append(budget_adjust_note)
+    if scenario_budget_upper - scenario_budget_lower > _budget_epsilon(scenario_budget_upper):
+        notes.append(
+            f"Scenario budget band active: {round(scenario_budget_lower, 2)} to {round(scenario_budget_upper, 2)}."
+        )
 
-    def try_accept_candidate(vec: np.ndarray, family: str, seed_source: str, near_opt: bool) -> bool:
+    budget_zone_preference = str(params.get("budget_zone_preference", "mixed"))
+
+    def try_accept_candidate(
+        vec: np.ndarray,
+        family: str,
+        seed_source: str,
+        near_opt: bool,
+        budget_target: float | None = None,
+    ) -> bool:
         nonlocal near_count, accepted_scaled
-        projected = _project_vector_to_budget(vec, target_budget, bounds, coeffs, baseline_budget)
+        sampled_budget_target = (
+            float(budget_target)
+            if budget_target is not None
+            else _sample_budget_target_in_band(
+                lower_budget=scenario_budget_lower,
+                upper_budget=scenario_budget_upper,
+                budget_zone_preference=budget_zone_preference,
+                near_opt=near_opt,
+                rng=rng,
+            )
+        )
+        projected = _project_vector_to_budget(
+            vec,
+            sampled_budget_target,
+            bounds,
+            coeffs,
+            baseline_budget,
+        )
+        if projected is None:
+            projected = _project_vector_to_budget_band(
+                vec,
+                scenario_budget_lower,
+                scenario_budget_upper,
+                bounds,
+                coeffs,
+                baseline_budget,
+            )
         if projected is None:
             return False
-        if not _is_vector_feasible(projected, target_budget, bounds, coeffs, baseline_budget):
+        if not _is_vector_feasible_in_budget_band(
+            projected,
+            scenario_budget_lower,
+            scenario_budget_upper,
+            bounds,
+            coeffs,
+            baseline_budget,
+        ):
             return False
         key = _vector_key(projected)
         if key in exact_keys:
@@ -3832,9 +4580,49 @@ def _generate_scenarios_for_context(
             done = max(0, len(accepted) - near_count)
             set_progress(52 + int(min(33, 33 * done / span)), "Generating diverse strategy scenarios...")
 
+    if len(accepted) < target_total and not timeout_hit:
+        original_min_distance = float(min_distance)
+        relaxation_levels = [
+            max(0.0, original_min_distance * 0.5),
+            max(0.0, original_min_distance * 0.25),
+            max(0.0, original_min_distance * 0.1),
+            0.0,
+        ]
+        seen_levels: set[float] = set()
+        for relaxed_min_distance in relaxation_levels:
+            relaxed_min_distance = float(round(relaxed_min_distance, 6))
+            if relaxed_min_distance in seen_levels:
+                continue
+            seen_levels.add(relaxed_min_distance)
+            if relaxed_min_distance >= min_distance:
+                continue
+            notes.append(
+                f"Feasible space is tight under current budget and constraints; relaxing diversity threshold from {min_distance:.4f} to {relaxed_min_distance:.4f}."
+            )
+            min_distance = relaxed_min_distance
+            for fam, seed in seeds.items():
+                try_accept_candidate(seed, family=fam, seed_source=f"{fam}_seed_relaxed", near_opt=False)
+            relax_attempts = 0
+            relax_max_attempts = max(2500, SCENARIO_MAX_ATTEMPTS // 3)
+            while len(accepted) < target_total and relax_attempts < relax_max_attempts:
+                if timed_out():
+                    timeout_hit = True
+                    break
+                relax_attempts += 1
+                fam = _sample_family(family_weights, rng)
+                base = seeds[fam]
+                candidate = _sample_candidate_vector(base, fam, False, bounds, regions, params, rng)
+                try_accept_candidate(candidate, family=fam, seed_source=f"{fam}_relaxed", near_opt=False)
+            if timeout_hit or len(accepted) >= target_total:
+                break
+
     if len(accepted) < target_total:
         notes.append(
-            f"Returned {len(accepted)} feasible unique scenarios (requested up to {target_total}); strict constraints and diversity threshold reduced feasible space."
+            f"Returned {len(accepted)} feasible unique scenarios (requested up to {target_total}); feasible space is narrow under current budget + market constraints."
+        )
+    if len(accepted) <= 1:
+        notes.append(
+            "AI strategy guidance was applied, but hard feasibility constraints dominate this run. Loosen market bounds or align target budget to feasible range for more options."
         )
     if timeout_hit:
         notes.append(f"Generation stopped at runtime cap ({runtime_limit}s) to keep UI responsive.")
@@ -3853,12 +4641,23 @@ def _generate_scenarios_for_context(
         "near_opt_count": near_count,
         "near_opt_target": target_near,
         "min_distance": round(float(min_distance), 4),
-        "budget_tolerance": _budget_epsilon(target_budget),
+        "budget_tolerance": _budget_epsilon(scenario_budget_upper),
+        "requested_scenario_budget_lower": round(float(requested_band_lower), 4),
+        "requested_scenario_budget_upper": round(float(requested_band_upper), 4),
+        "effective_scenario_budget_lower": round(float(scenario_budget_lower), 4),
+        "effective_scenario_budget_upper": round(float(scenario_budget_upper), 4),
+        "budget_band_lower": round(float(scenario_budget_lower), 4),
+        "budget_band_upper": round(float(scenario_budget_upper), 4),
+        "budget_band_lower_ratio": round(float(SCENARIO_BUDGET_BAND_LOWER_RATIO), 4),
+        "budget_zone_preference": budget_zone_preference,
         "runtime_seconds": round(float(time.time() - started_at), 2),
         "runtime_cap_seconds": runtime_limit,
         "selected_brand": ctx["brand"],
         "selected_markets": regions,
+        "requested_target_budget": round(requested_target_budget, 4),
         "target_budget": round(target_budget, 4),
+        "feasible_budget_min": round(feasible_budget_min, 4),
+        "feasible_budget_max": round(feasible_budget_max, 4),
         "baseline_budget": round(float(ctx["baseline_budget"]), 4),
         "strategy": strategy,
     }
@@ -3883,6 +4682,8 @@ def _run_scenario_job(job_id: str, payload: ScenarioJobCreateRequest) -> None:
             "target_budget": round(float(ctx["target_budget"]), 4),
             "baseline_budget": round(float(ctx["baseline_budget"]), 4),
             "markets": ctx["regions"],
+            "scenario_budget_lower": payload.scenario_budget_lower,
+            "scenario_budget_upper": payload.scenario_budget_upper,
         }
         _update_scenario_job(job_id, progress=15, message="Translating intent into strategy controls...")
         strategy, strategy_notes = _translate_intent_to_strategy(payload.intent_prompt, constraints_context)
@@ -3896,6 +4697,8 @@ def _run_scenario_job(job_id: str, payload: ScenarioJobCreateRequest) -> None:
             set_progress,
             target_total_requested=payload.target_scenarios,
             max_runtime_seconds=payload.max_runtime_seconds,
+            requested_scenario_budget_lower=payload.scenario_budget_lower,
+            requested_scenario_budget_upper=payload.scenario_budget_upper,
         )
         result_payload = {
             "summary": artifacts["summary"],
@@ -3933,6 +4736,9 @@ def _paginate_scenario_results(
     max_volume_uplift_pct: float | None,
     min_revenue_uplift_pct: float | None,
     max_revenue_uplift_pct: float | None,
+    min_budget_utilized_pct: float | None,
+    max_budget_utilized_pct: float | None,
+    target_budget: float | None,
 ) -> dict[str, Any]:
     allowed_sort = {
         "balanced_score",
@@ -3962,6 +4768,16 @@ def _paginate_scenario_results(
         items = [s for s in items if float(s.get("revenue_uplift_pct", 0.0)) >= float(min_revenue_uplift_pct)]
     if max_revenue_uplift_pct is not None:
         items = [s for s in items if float(s.get("revenue_uplift_pct", 0.0)) <= float(max_revenue_uplift_pct)]
+    if min_budget_utilized_pct is not None or max_budget_utilized_pct is not None:
+        tb = float(_finite(target_budget, 0.0))
+        def _util_pct(s: dict[str, Any]) -> float:
+            if tb <= 1e-12:
+                return 0.0
+            return float(s.get("total_new_spend", 0.0)) / tb * 100.0
+        if min_budget_utilized_pct is not None:
+            items = [s for s in items if _util_pct(s) >= float(min_budget_utilized_pct)]
+        if max_budget_utilized_pct is not None:
+            items = [s for s in items if _util_pct(s) <= float(max_budget_utilized_pct)]
 
     reverse = sort_dir == "desc"
     if sort_key == "scenario_id":
@@ -4060,6 +4876,8 @@ def service_get_scenario_job_results(
     max_volume_uplift_pct: float | None = None,
     min_revenue_uplift_pct: float | None = None,
     max_revenue_uplift_pct: float | None = None,
+    min_budget_utilized_pct: float | None = None,
+    max_budget_utilized_pct: float | None = None,
 ) -> Any:
     job = _read_scenario_job(job_id)
     status = str(job.get("status", "queued"))
@@ -4110,6 +4928,9 @@ def service_get_scenario_job_results(
         max_volume_uplift_pct=max_volume_uplift_pct,
         min_revenue_uplift_pct=min_revenue_uplift_pct,
         max_revenue_uplift_pct=max_revenue_uplift_pct,
+        min_budget_utilized_pct=min_budget_utilized_pct,
+        max_budget_utilized_pct=max_budget_utilized_pct,
+        target_budget=float((result.get("summary") or {}).get("target_budget", 0.0)),
     )
     return {
         "ready": True,
@@ -4127,6 +4948,162 @@ def service_get_scenario_job_results(
             "sort_dir": pagination["sort_dir"],
         },
         "items": pagination["items"],
+    }
+
+
+def _call_gemini_plain_text(prompt: str, max_tokens: int = 650) -> tuple[str | None, list[str]]:
+    notes: list[str] = []
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        notes.append("Gemini API key missing; fallback summary applied.")
+        return None, notes
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    body = {
+        "generationConfig": {
+            "temperature": 0.2,
+            "topP": 0.9,
+            "maxOutputTokens": int(max(256, min(max_tokens, 1200))),
+        },
+        "contents": [{"parts": [{"text": prompt}]}],
+    }
+    req = urlrequest.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    retries = 2
+    for attempt in range(retries + 1):
+        try:
+            with urlrequest.urlopen(req, timeout=25) as resp:
+                raw = resp.read().decode("utf-8")
+            parsed = json.loads(raw)
+            candidates = parsed.get("candidates", [])
+            parts = candidates[0].get("content", {}).get("parts", []) if candidates and isinstance(candidates, list) else []
+            text = str(parts[0].get("text", "")).strip() if parts and isinstance(parts, list) else ""
+            if text:
+                return text, notes
+            notes.append("Gemini returned empty summary; fallback summary applied.")
+            return None, notes
+        except urlerror.HTTPError as exc:
+            if exc.code == 429 and attempt < retries:
+                time.sleep(0.8 * (2 ** attempt))
+                continue
+            if exc.code == 429:
+                notes.append("Gemini rate limit reached (HTTP 429); fallback summary applied.")
+            elif exc.code == 404:
+                notes.append("Gemini model not found (HTTP 404); fallback summary applied.")
+            elif exc.code == 400:
+                notes.append("Gemini request invalid (HTTP 400); fallback summary applied.")
+            else:
+                notes.append(f"Gemini HTTP error ({exc.code}); fallback summary applied.")
+            return None, notes
+        except Exception:
+            if attempt < retries:
+                time.sleep(0.8 * (2 ** attempt))
+            else:
+                notes.append("Gemini request failed; fallback summary applied.")
+    return None, notes
+
+
+def _build_scenario_market_deltas(markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    old_total_spend = sum(max(0.0, float(_finite(m.get("old_total_spend", 0.0), 0.0))) for m in markets)
+    out: list[dict[str, Any]] = []
+    for row in markets:
+        market = str(row.get("market", "")).strip()
+        if not market:
+            continue
+        old_sp = max(0.0, float(_finite(row.get("old_total_spend", 0.0), 0.0)))
+        new_share = max(0.0, float(_finite(row.get("new_budget_share", 0.0), 0.0))) * 100.0
+        old_share = (old_sp / old_total_spend * 100.0) if old_total_spend > 1e-9 else 0.0
+        budget_delta = new_share - old_share
+        old_tv = float(_finite(row.get("fy25_tv_share", row.get("tv_split", 0.0)), 0.0)) * 100.0
+        new_tv = float(_finite(row.get("tv_split", 0.0), 0.0)) * 100.0
+        old_dg = float(_finite(row.get("fy25_digital_share", row.get("digital_split", 0.0)), 0.0)) * 100.0
+        new_dg = float(_finite(row.get("digital_split", 0.0), 0.0)) * 100.0
+        tv_delta = new_tv - old_tv
+        dg_delta = new_dg - old_dg
+        out.append(
+            {
+                "market": market,
+                "old_budget_share_pct": round(old_share, 2),
+                "new_budget_share_pct": round(new_share, 2),
+                "budget_share_change_pct": round(budget_delta, 2),
+                "old_tv_split_pct": round(old_tv, 2),
+                "new_tv_split_pct": round(new_tv, 2),
+                "tv_split_change_pct": round(tv_delta, 2),
+                "old_digital_split_pct": round(old_dg, 2),
+                "new_digital_split_pct": round(new_dg, 2),
+                "digital_split_change_pct": round(dg_delta, 2),
+            }
+        )
+    out.sort(key=lambda r: abs(float(r.get("budget_share_change_pct", 0.0))), reverse=True)
+    return out
+
+
+def _fallback_scenario_summary_text(payload: ScenarioSummaryRequest, deltas: list[dict[str, Any]]) -> str:
+    inc = [d["market"] for d in deltas if float(d.get("budget_share_change_pct", 0.0)) > 0][:4]
+    dec = [d["market"] for d in deltas if float(d.get("budget_share_change_pct", 0.0)) < 0][:4]
+    tv_up = [d["market"] for d in deltas if float(d.get("tv_split_change_pct", 0.0)) > 0][:3]
+    dg_up = [d["market"] for d in deltas if float(d.get("digital_split_change_pct", 0.0)) > 0][:3]
+    util_pct = (payload.total_new_spend / payload.target_budget * 100.0) if payload.target_budget > 1e-9 else 0.0
+    return (
+        f"Scenario {payload.scenario_id} summary for {payload.selected_brand}: "
+        f"Revenue uplift is {payload.revenue_uplift_pct:+.2f}% with budget utilized at {util_pct:.1f}% of target. "
+        f"Budget was increased mainly in {', '.join(inc) if inc else 'no major markets'} and reduced in {', '.join(dec) if dec else 'no major markets'}. "
+        f"TV mix increased in {', '.join(tv_up) if tv_up else 'limited markets'}, while Digital mix increased in {', '.join(dg_up) if dg_up else 'limited markets'}. "
+        "Use this as a scenario-level readout of post-optimization state TV/Digital allocation changes."
+    )
+
+
+def service_scenario_summary(payload: ScenarioSummaryRequest) -> dict[str, Any]:
+    markets = payload.markets or []
+    if not markets:
+        raise HTTPException(status_code=400, detail="Scenario market rows are required for summary generation.")
+    deltas = payload.state_change_rows or _build_scenario_market_deltas(markets)
+    compact_rows = deltas[:20]
+    util_pct = (payload.total_new_spend / payload.target_budget * 100.0) if payload.target_budget > 1e-9 else 0.0
+    increases = [r for r in deltas if float(_finite(r.get("budget_share_change_pct", 0.0), 0.0)) > 0]
+    decreases = [r for r in deltas if float(_finite(r.get("budget_share_change_pct", 0.0), 0.0)) < 0]
+    tv_up = [r for r in deltas if float(_finite(r.get("tv_split_change_pct", 0.0), 0.0)) > 0]
+    tv_down = [r for r in deltas if float(_finite(r.get("tv_split_change_pct", 0.0), 0.0)) < 0]
+    dg_up = [r for r in deltas if float(_finite(r.get("digital_split_change_pct", 0.0), 0.0)) > 0]
+    dg_down = [r for r in deltas if float(_finite(r.get("digital_split_change_pct", 0.0), 0.0)) < 0]
+    prompt = (
+        "You are a senior MMM strategy analyst. Analyze ONLY post-optimization state-level changes.\n"
+        "Write an intelligent business summary in 7-10 crisp lines.\n"
+        "Do not use markdown tables. Avoid generic statements. Mention concrete states and directional changes.\n"
+        "Output sections in plain text:\n"
+        "1) What changed most\n"
+        "2) Budget reallocation readout (increase/decrease states)\n"
+        "3) Channel mix readout (TV up/down, Digital up/down states)\n"
+        "4) Recommended execution focus\n"
+        "5) Risk watchouts\n"
+        f"Brand: {payload.selected_brand}\n"
+        f"Scenario ID: {payload.scenario_id}\n"
+        f"Revenue uplift %: {payload.revenue_uplift_pct:.2f}\n"
+        f"Budget utilized % of target: {util_pct:.2f}\n"
+        f"User focus: {str(payload.user_prompt or '').strip()}\n"
+        f"Budget share increased states: {json.dumps([r.get('market') for r in increases[:8]], ensure_ascii=True)}\n"
+        f"Budget share decreased states: {json.dumps([r.get('market') for r in decreases[:8]], ensure_ascii=True)}\n"
+        f"TV share up states: {json.dumps([r.get('market') for r in tv_up[:8]], ensure_ascii=True)}\n"
+        f"TV share down states: {json.dumps([r.get('market') for r in tv_down[:8]], ensure_ascii=True)}\n"
+        f"Digital share up states: {json.dumps([r.get('market') for r in dg_up[:8]], ensure_ascii=True)}\n"
+        f"Digital share down states: {json.dumps([r.get('market') for r in dg_down[:8]], ensure_ascii=True)}\n"
+        f"State change snapshot: {json.dumps(compact_rows, ensure_ascii=True)}\n"
+    )
+    text, notes = _call_gemini_plain_text(prompt, max_tokens=700)
+    provider = "gemini"
+    if not text:
+        provider = "fallback"
+        text = _fallback_scenario_summary_text(payload, deltas)
+    return {
+        "status": "ok",
+        "provider": provider,
+        "scenario_id": payload.scenario_id,
+        "summary_text": _clip_text(str(text).strip(), 2400),
+        "notes": notes,
     }
 
 
