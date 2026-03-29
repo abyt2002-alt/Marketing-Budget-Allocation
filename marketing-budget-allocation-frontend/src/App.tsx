@@ -8,12 +8,33 @@ import {
   ChevronDown,
   ChevronUp,
   CheckCircle2,
+  Download,
   LoaderCircle,
   ShieldCheck,
   SlidersHorizontal,
   Target,
   X,
 } from 'lucide-react'
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+  XAxis,
+  YAxis,
+  LabelList,
+} from 'recharts'
+import {
+  DEFAULT_SAVED_SCENARIOS_MAX,
+  buildSavedItem,
+  nextPlanName,
+  readSavedItems,
+  writeSavedItems,
+  type SavedItem,
+  type SavedItemSummary,
+} from './saved/SavedItemsStore'
 
 type AutoConfigResponse = {
   status: 'ok' | 'error'
@@ -561,6 +582,37 @@ type AIInsightsSummaryResponse = {
   notes: string[]
 }
 
+type AppSnapshotPayload = {
+  activeMainTab: 's_curves' | 'budget_allocation'
+  selectedBrand: string
+  selectedMarkets: string[]
+  budgetType: 'percentage' | 'absolute'
+  budgetValue: number
+  scenarioIntent: string
+  marketOverrides: Record<string, MarketOverride>
+  step2Enabled: boolean
+  step2SetupCollapsed: boolean
+  step1Collapsed: boolean
+  brandAllocation: BrandAllocationResponse | null
+  result: OptimizeAutoResponse | null
+  constraintsPreview: OptimizeAutoResponse | null
+  constraintsOpen: boolean
+  constraintMarket: string
+  scenarioJobId: string
+  scenarioStatus: 'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'expired'
+  scenarioProgress: number
+  scenarioMessage: string
+  scenarioError: string
+  scenarioResults: ScenarioResultsResponse | null
+  selectedScenarioId: string
+  scenarioPage: number
+  scenarioSortKey: string
+  scenarioSortDir: 'asc' | 'desc'
+  scenarioMinRevenuePct: string
+  scenarioMaxBudgetUtilizedPctFilter: string
+  scenarioFlowSortKey: 'share' | 'spend'
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8020'
 const normalizeBrandKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '')
 const SCENARIO_PROGRESS_STAGES = [
@@ -628,6 +680,9 @@ function App() {
   const [scenarioMaxBudgetUtilizedPctFilter, setScenarioMaxBudgetUtilizedPctFilter] = useState('')
   const [scenarioFlowSortKey, setScenarioFlowSortKey] = useState<'share' | 'spend'>('share')
   const [scenarioMarketModal, setScenarioMarketModal] = useState<{ row: ScenarioMarketFlowRow; tone: 'increase' | 'decrease' } | null>(null)
+  const [savedScenarioItems, setSavedScenarioItems] = useState<SavedItem<AppSnapshotPayload>[]>([])
+  const [savedMenuOpen, setSavedMenuOpen] = useState(false)
+  const [notice, setNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const [sCurvesData, setSCurvesData] = useState<SCurvesResponse | null>(null)
   const [sCurvesLoading, setSCurvesLoading] = useState(false)
   const [sCurvesError, setSCurvesError] = useState('')
@@ -646,6 +701,7 @@ function App() {
   const [aiModeData, setAiModeData] = useState<AIInsightsSummaryResponse | null>(null)
   const latestInsightsSelectionRef = useRef<{ brand: string; market: string }>({ brand: '', market: '' })
   const marketDropdownRef = useRef<HTMLDivElement | null>(null)
+  const savedMenuRef = useRef<HTMLDivElement | null>(null)
   const sCurveRequestSeqRef = useRef(0)
   const contributionRequestSeqRef = useRef(0)
   const yoyRequestSeqRef = useRef(0)
@@ -703,6 +759,10 @@ function App() {
       return value * ABSOLUTE_BUDGET_UNIT_MN
     }
     return value
+  }
+
+  function pushNotice(type: 'success' | 'error', message: string) {
+    setNotice({ type, message })
   }
 
   function getStep2BudgetInput() {
@@ -820,6 +880,44 @@ function App() {
 
     void loadAutoConfig()
   }, [])
+
+  useEffect(() => {
+    setSavedScenarioItems(readSavedItems<AppSnapshotPayload>())
+  }, [])
+
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(null), 2500)
+    return () => clearTimeout(timer)
+  }, [notice])
+
+  useEffect(() => {
+    if (savedScenarioItems.length === 0) {
+      setSavedMenuOpen(false)
+    }
+  }, [savedScenarioItems.length])
+
+  useEffect(() => {
+    if (!savedMenuOpen) return
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (savedMenuRef.current && !savedMenuRef.current.contains(target)) {
+        setSavedMenuOpen(false)
+      }
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSavedMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [savedMenuOpen])
 
   useEffect(() => {
     if (!selectedBrand || !config) {
@@ -1497,6 +1595,179 @@ function App() {
     }
   }
 
+  function buildSnapshot(): AppSnapshotPayload {
+    return {
+      activeMainTab,
+      selectedBrand,
+      selectedMarkets: [...selectedMarkets],
+      budgetType,
+      budgetValue,
+      scenarioIntent,
+      marketOverrides,
+      step2Enabled,
+      step2SetupCollapsed,
+      step1Collapsed,
+      brandAllocation,
+      result,
+      constraintsPreview,
+      constraintsOpen,
+      constraintMarket,
+      scenarioJobId,
+      scenarioStatus,
+      scenarioProgress,
+      scenarioMessage,
+      scenarioError,
+      scenarioResults,
+      selectedScenarioId,
+      scenarioPage,
+      scenarioSortKey,
+      scenarioSortDir,
+      scenarioMinRevenuePct,
+      scenarioMaxBudgetUtilizedPctFilter,
+      scenarioFlowSortKey,
+    }
+  }
+
+  function applySnapshot(snapshot: AppSnapshotPayload) {
+    setActiveMainTab('budget_allocation')
+    setSelectedBrand(snapshot.selectedBrand ?? '')
+    setSelectedMarkets(snapshot.selectedMarkets ?? [])
+    setBudgetType(snapshot.budgetType ?? 'percentage')
+    setBudgetValue(Number(snapshot.budgetValue ?? 0))
+    setScenarioIntent(snapshot.scenarioIntent ?? '')
+    setMarketOverrides(snapshot.marketOverrides ?? {})
+    setStep2Enabled(Boolean(snapshot.step2Enabled))
+    setStep2SetupCollapsed(Boolean(snapshot.step2SetupCollapsed))
+    setStep1Collapsed(Boolean(snapshot.step1Collapsed))
+    setBrandAllocation(snapshot.brandAllocation ?? null)
+    setResult(snapshot.result ?? null)
+    setConstraintsPreview(snapshot.constraintsPreview ?? null)
+    setConstraintsOpen(Boolean(snapshot.constraintsOpen))
+    setConstraintMarket(snapshot.constraintMarket ?? '')
+    setScenarioJobId(snapshot.scenarioJobId ?? '')
+    setScenarioStatus(snapshot.scenarioStatus ?? 'idle')
+    setScenarioProgress(Number(snapshot.scenarioProgress ?? 0))
+    setScenarioMessage(snapshot.scenarioMessage ?? '')
+    setScenarioError(snapshot.scenarioError ?? '')
+    setScenarioResults(snapshot.scenarioResults ?? null)
+    setSelectedScenarioId(snapshot.selectedScenarioId ?? '')
+    setScenarioPage(Math.max(1, Number(snapshot.scenarioPage ?? 1)))
+    setScenarioSortKey(snapshot.scenarioSortKey ?? 'revenue_uplift_pct')
+    setScenarioSortDir(snapshot.scenarioSortDir ?? 'desc')
+    setScenarioMinRevenuePct(snapshot.scenarioMinRevenuePct ?? '')
+    setScenarioMaxBudgetUtilizedPctFilter(snapshot.scenarioMaxBudgetUtilizedPctFilter ?? '')
+    setScenarioFlowSortKey(snapshot.scenarioFlowSortKey ?? 'share')
+    setScenarioMarketModal(null)
+    setStep1Error('')
+    setStep1EditError('')
+    setErrorMessage('')
+    setAiModeOpen(false)
+  }
+
+  function buildSavedSummary(): SavedItemSummary {
+    const currentScenario =
+      scenarioResults?.items.find((item) => item.scenario_id === selectedScenarioId) ?? null
+    return {
+      selected_brand: selectedBrand,
+      markets_count: selectedMarkets.length,
+      scenario_count: Number(scenarioResults?.summary.scenario_count ?? 0),
+      scenario_id: currentScenario?.scenario_id ?? null,
+      revenue_uplift_pct:
+        currentScenario?.revenue_uplift_pct ?? scenarioResults?.anchors.best_revenue?.revenue_uplift_pct ?? null,
+      budget_utilized: currentScenario?.total_new_spend ?? null,
+    }
+  }
+
+  function handleSaveSelectedScenario() {
+    if (!selectedScenario) {
+      pushNotice('error', 'Select a scenario first, then save it.')
+      return
+    }
+    try {
+      const defaultName = nextPlanName(savedScenarioItems)
+      const customName = window.prompt('Save scenario as', defaultName)
+      if (customName == null) return
+      const finalName = customName.trim() || defaultName
+      const item = buildSavedItem<AppSnapshotPayload>({
+        name: finalName,
+        summary: buildSavedSummary(),
+        payload: buildSnapshot(),
+      })
+      const nextItems = [item, ...savedScenarioItems].slice(0, DEFAULT_SAVED_SCENARIOS_MAX)
+      setSavedScenarioItems(nextItems)
+      writeSavedItems(nextItems)
+      pushNotice('success', `Saved as ${item.name}.`)
+    } catch {
+      pushNotice('error', 'Unable to save current scenario.')
+    }
+  }
+
+  function handleApplySavedItem(item: SavedItem<AppSnapshotPayload>) {
+    try {
+      applySnapshot(item.payload)
+      pushNotice('success', `Applied ${item.name}.`)
+    } catch {
+      pushNotice('error', 'Unable to apply saved scenario.')
+    }
+  }
+
+  function handleDeleteSavedItem(id: string) {
+    try {
+      const nextItems = savedScenarioItems.filter((item) => item.id !== id)
+      setSavedScenarioItems(nextItems)
+      writeSavedItems(nextItems)
+      pushNotice('success', 'Saved scenario deleted.')
+    } catch {
+      pushNotice('error', 'Unable to delete saved scenario.')
+    }
+  }
+
+  function handleRenameSavedItem(item: SavedItem<AppSnapshotPayload>) {
+    const nextName = window.prompt('Rename saved scenario', item.name)
+    if (!nextName) return
+    const trimmed = nextName.trim()
+    if (!trimmed) return
+    try {
+      const nextItems = savedScenarioItems.map((row) =>
+        row.id === item.id ? { ...row, name: trimmed } : row,
+      )
+      setSavedScenarioItems(nextItems)
+      writeSavedItems(nextItems)
+      pushNotice('success', 'Saved scenario renamed.')
+    } catch {
+      pushNotice('error', 'Unable to rename saved scenario.')
+    }
+  }
+
+  function handleDownloadSavedItems() {
+    if (savedScenarioItems.length === 0) {
+      pushNotice('error', 'No saved scenarios to download.')
+      return
+    }
+    try {
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        count: savedScenarioItems.length,
+        items: savedScenarioItems,
+      }
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: 'application/json',
+      })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      link.href = url
+      link.download = `saved-scenarios-${stamp}.json`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      pushNotice('success', 'Saved scenarios downloaded.')
+    } catch {
+      pushNotice('error', 'Unable to download saved scenarios.')
+    }
+  }
+
   useEffect(() => {
     if (!scenarioJobId) return
     if (!(scenarioStatus === 'queued' || scenarioStatus === 'running')) return
@@ -1702,7 +1973,6 @@ function App() {
     const maxSpendDeltaMn = Math.max(1, ...rows.map((row) => Math.abs(row.spend_delta_mn)))
     return { increased, decreased, maxShareDeltaPct, maxSpendDeltaMn }
   }, [selectedScenario, selectedScenarioOriginalSpendTotal, scenarioFlowSortKey])
-  const scenarioChartWidth = 1200
   const scenarioPageRange = useMemo(() => {
     if (!scenarioResults || scenarioResults.items.length === 0) {
       return { start: 0, end: 0 }
@@ -3401,6 +3671,80 @@ function App() {
             </div>
           ) : (
             <div className="w-full space-y-5">
+            <div className="sticky top-0 z-30 flex justify-end">
+              <div ref={savedMenuRef} className="relative inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white p-1 shadow-sm">
+                <button
+                  type="button"
+                  onClick={handleDownloadSavedItems}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-4 py-1.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  <Download className="h-4 w-4" />
+                  Download
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSavedMenuOpen((prev) => !prev)}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-slate-300 bg-white px-4 py-1.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  Saved ({savedScenarioItems.length})
+                  <ChevronDown className={`h-4 w-4 transition-transform ${savedMenuOpen ? 'rotate-180' : ''}`} />
+                </button>
+
+                {savedMenuOpen ? (
+                  <div className="absolute right-0 top-[calc(100%+8px)] w-[360px] rounded-xl border border-slate-200 bg-white p-3 shadow-xl">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Saved Scenarios</p>
+                      <button
+                        type="button"
+                        onClick={handleDownloadSavedItems}
+                        className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                      >
+                        Download All
+                      </button>
+                    </div>
+                    {savedScenarioItems.length === 0 ? (
+                      <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                        No saved scenarios yet.
+                      </p>
+                    ) : (
+                      <div className="max-h-80 space-y-2 overflow-y-auto pr-1">
+                        {savedScenarioItems.map((item) => (
+                          <div key={`saved-inline-${item.id}`} className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleApplySavedItem(item)
+                                setSavedMenuOpen(false)
+                              }}
+                              className="w-full text-left text-sm font-semibold text-primary hover:underline"
+                            >
+                              {item.name}
+                            </button>
+                            <p className="mt-0.5 text-[11px] text-slate-500">{item.savedAtLabel}</p>
+                            <div className="mt-1.5 flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleRenameSavedItem(item)}
+                                className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100"
+                              >
+                                Rename
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteSavedItem(item.id)}
+                                className="rounded border border-red-200 bg-red-50 px-2 py-1 text-[11px] font-semibold text-red-700 hover:bg-red-100"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            </div>
             <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-panel">
               <div className="mb-2 flex items-start justify-between gap-3">
                 <div>
@@ -3716,14 +4060,22 @@ function App() {
                   </div>
 
                   <div className="rounded-xl border border-slate-200 bg-white p-4">
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      <select value={scenarioSortKey} onChange={(event) => { setScenarioSortKey(event.target.value); setScenarioPage(1) }} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select value={scenarioSortKey} onChange={(event) => { setScenarioSortKey(event.target.value); setScenarioPage(1) }} className="min-w-[220px] flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200">
                         <option value="revenue_uplift_pct">Sort by: Revenue</option>
                       </select>
-                      <select value={scenarioSortDir} onChange={(event) => { setScenarioSortDir(event.target.value === 'asc' ? 'asc' : 'desc'); setScenarioPage(1) }} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200">
+                      <select value={scenarioSortDir} onChange={(event) => { setScenarioSortDir(event.target.value === 'asc' ? 'asc' : 'desc'); setScenarioPage(1) }} className="min-w-[180px] flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200">
                         <option value="desc">Descending</option>
                         <option value="asc">Ascending</option>
                       </select>
+                      <button
+                        type="button"
+                        onClick={handleSaveSelectedScenario}
+                        disabled={!selectedScenario}
+                        className="rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-400"
+                      >
+                        Save Selected
+                      </button>
                     </div>
 
                     <div className="mt-3 flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
@@ -3770,124 +4122,134 @@ function App() {
                     ) : (
                       <>
                         <div className="mt-3 rounded-lg border border-slate-200 bg-white px-2 py-2 sm:px-3">
-                          <svg className="w-full" viewBox={`0 0 ${scenarioChartWidth} 320`} role="img" aria-label="Revenue and budget utilized comparison chart">
-                            {(() => {
-                              const chartHeight = 320
-                              const left = 66
-                              const right = 66
-                              const top = 32
-                              const bottom = 46
-                              const plotWidth = scenarioChartWidth - left - right
-                              const plotHeight = chartHeight - top - bottom
-                              const revenues = scenarioResults.items.map((item) => Number(item.revenue_uplift_pct ?? 0))
-                              const revMinRaw = Math.min(0, ...revenues)
-                              const revMaxRaw = Math.max(1, ...revenues)
-                              const revAxisMin = revMinRaw < -0.001 ? revMinRaw * 1.12 : 0
-                              const revAxisMax = revMaxRaw * 1.12
-                              const budgetMax = Math.max(100, scenarioBudgetAxisMax)
-                              const targetBudget = Number(scenarioResults.summary.target_budget ?? 0)
-                              const revSpan = Math.max(1e-6, revAxisMax - revAxisMin)
-                              const yRev = (value: number) => top + ((revAxisMax - value) / revSpan) * plotHeight
-                              const zeroRevY = yRev(0)
-                              const yBudget = (value: number) => {
-                                const clamped = Math.max(0, Math.min(budgetMax, value))
-                                const upRange = Math.max(1, zeroRevY - top)
-                                return zeroRevY - (clamped / budgetMax) * upRange
-                              }
-                              const revTicks =
-                                revAxisMin < -0.001
-                                  ? [revAxisMin, revAxisMin * 0.5, 0, revAxisMax * 0.5, revAxisMax]
-                                  : [0, revAxisMax * 0.25, revAxisMax * 0.5, revAxisMax * 0.75, revAxisMax]
-                              const budgetTicks = [0, budgetMax * 0.25, budgetMax * 0.5, budgetMax * 0.75, budgetMax]
-                              const maxBudgetLineY = yBudget(scenarioMaxBudgetUtilizedPct)
-                              return (
-                                <>
-                                  {revTicks.map((tick, idx) => {
-                                    const y = yRev(tick)
-                                    return (
-                                      <g key={`rev-tick-${idx}`}>
-                                        <line x1={left} x2={scenarioChartWidth - right} y1={y} y2={y} stroke={tick === 0 ? '#94A3B8' : '#E2E8F0'} />
-                                        <text x={left - 8} y={y + 4} textAnchor="end" fill="#64748B" fontSize="10">
-                                          {tick.toFixed(1)}%
-                                        </text>
-                                      </g>
-                                    )
-                                  })}
-                                  {budgetTicks.map((tick, idx) => {
-                                    const y = yBudget(tick)
-                                    return (
-                                      <text key={`budget-axis-${idx}`} x={scenarioChartWidth - right + 8} y={y + 4} textAnchor="start" fill="#64748B" fontSize="10">
-                                        {tick.toFixed(0)}%
-                                      </text>
-                                    )
-                                  })}
-                                  <line
-                                    x1={left}
-                                    x2={scenarioChartWidth - right}
-                                    y1={maxBudgetLineY}
-                                    y2={maxBudgetLineY}
+                          {(() => {
+                            const targetBudget = Number(scenarioResults.summary.target_budget ?? 0)
+                            const chartData = scenarioResults.items.map((item) => ({
+                              scenarioId: item.scenario_id,
+                              scenarioLabel:
+                                item.scenario_id.length > 14
+                                  ? `${item.scenario_id.slice(0, 14)}...`
+                                  : item.scenario_id,
+                              revenuePct: Number(item.revenue_uplift_pct ?? 0),
+                              budgetUtilizedPct:
+                                targetBudget > 1e-12
+                                  ? (Number(item.total_new_spend ?? 0) / targetBudget) * 100
+                                  : 0,
+                            }))
+                            const revValues = chartData.map((row) => row.revenuePct)
+                            const revMinRaw = Math.min(0, ...revValues)
+                            const revMaxRaw = Math.max(1, ...revValues)
+                            const revPad = Math.max(1, (revMaxRaw - revMinRaw) * 0.12)
+                            const revAxisMin = revMinRaw < 0 ? revMinRaw - revPad * 0.2 : 0
+                            const revAxisMax = revMaxRaw + revPad
+                            const budgetMax = Math.max(100, scenarioBudgetAxisMax)
+
+                            return (
+                              <ResponsiveContainer width="100%" height={300}>
+                                <BarChart
+                                  data={chartData}
+                                  margin={{ top: 18, right: 14, left: 4, bottom: 22 }}
+                                  barCategoryGap="24%"
+                                  barGap={6}
+                                  onClick={(state: any) => {
+                                    const row = state?.activePayload?.[0]?.payload as
+                                      | { scenarioId?: string }
+                                      | undefined
+                                    if (row?.scenarioId) {
+                                      setSelectedScenarioId(row.scenarioId)
+                                    }
+                                  }}
+                                >
+                                  <CartesianGrid stroke="#E2E8F0" strokeDasharray="3 3" />
+                                  <ReferenceLine yAxisId="left" y={0} stroke="#64748B" strokeWidth={1} />
+                                  {selectedScenarioId ? (
+                                    <ReferenceArea
+                                      xAxisId="x"
+                                      yAxisId="left"
+                                      x1={selectedScenarioId}
+                                      x2={selectedScenarioId}
+                                      y1={revAxisMin}
+                                      y2={revAxisMax}
+                                      fill="#EFF6FF"
+                                      fillOpacity={1}
+                                      stroke="#93C5FD"
+                                      strokeWidth={1}
+                                    />
+                                  ) : null}
+                                  <XAxis
+                                    xAxisId="x"
+                                    dataKey="scenarioId"
+                                    tick={{ fontSize: 11, fontWeight: 700, fill: '#0F172A' }}
+                                    tickMargin={8}
+                                    interval={0}
+                                    axisLine={{ stroke: '#94A3B8' }}
+                                    tickLine={false}
+                                  />
+                                  <YAxis
+                                    yAxisId="left"
+                                    domain={[revAxisMin, revAxisMax]}
+                                    tick={{ fontSize: 12, fontWeight: 700, fill: '#0F172A' }}
+                                    tickFormatter={(value: number) => `${value.toFixed(1)}%`}
+                                    axisLine={{ stroke: '#94A3B8' }}
+                                    tickLine={false}
+                                    width={54}
+                                  />
+                                  <YAxis
+                                    yAxisId="right"
+                                    orientation="right"
+                                    domain={[0, budgetMax]}
+                                    tick={{ fontSize: 12, fontWeight: 700, fill: '#0F172A' }}
+                                    tickFormatter={(value: number) => `${value.toFixed(0)}%`}
+                                    axisLine={{ stroke: '#94A3B8' }}
+                                    tickLine={false}
+                                    width={52}
+                                  />
+                                  <ReferenceLine
+                                    yAxisId="right"
+                                    y={scenarioMaxBudgetUtilizedPct}
                                     stroke="#3B82F6"
                                     strokeDasharray="4 4"
                                   />
-                                  {scenarioResults.items.map((item, idx) => {
-                                    const groupWidth = plotWidth / Math.max(1, scenarioResults.items.length)
-                                    const centerX = left + groupWidth * (idx + 0.5)
-                                    const barWidth = Math.min(14, Math.max(9, groupWidth * 0.11))
-                                    const gap = Math.max(22, Math.min(34, groupWidth * 0.34))
-                                    const revX = centerX - barWidth - gap / 2
-                                    const budgetX = centerX + gap / 2
-                                    const revYv = yRev(item.revenue_uplift_pct)
-                                    const revH = Math.abs(zeroRevY - revYv)
-                                    const utilPct = targetBudget > 1e-12 ? (Number(item.total_new_spend ?? 0) / targetBudget) * 100 : 0
-                                    const budY = yBudget(utilPct)
-                                    const budH = Math.max(1, zeroRevY - budY)
-                                    const revLabelX = revX + barWidth / 2 - 4
-                                    const budgetLabelX = budgetX + barWidth / 2 + 4
-                                    const labelYMin = top + 12
-                                    const labelYMax = chartHeight - bottom - 6
-                                    let finalRevLabelY = Math.max(
-                                      labelYMin,
-                                      Math.min(labelYMax, Math.min(revYv, zeroRevY) - 6),
-                                    )
-                                    let finalBudgetLabelY = Math.max(labelYMin, Math.min(labelYMax, budY - 6))
-                                    if (Math.abs(finalRevLabelY - finalBudgetLabelY) < 10) {
-                                      finalBudgetLabelY = Math.min(labelYMax, finalBudgetLabelY + 10)
-                                    }
-                                    const isSelected = selectedScenarioId === item.scenario_id
-                                    const label = item.scenario_id.length > 14 ? `${item.scenario_id.slice(0, 14)}...` : item.scenario_id
-                                    return (
-                                      <g key={item.scenario_id} onClick={() => setSelectedScenarioId(item.scenario_id)} style={{ cursor: 'pointer' }}>
-                                        {isSelected ? (
-                                          <rect x={centerX - groupWidth / 2 + 8} y={top} width={groupWidth - 16} height={plotHeight} fill="#EFF6FF" stroke="#93C5FD" rx={6} />
-                                        ) : null}
-                                        <rect x={revX} y={Math.min(revYv, zeroRevY)} width={barWidth} height={Math.max(1, revH)} fill="#22C55E" />
-                                        <rect x={budgetX} y={budY} width={barWidth} height={budH} fill="#2563EB" />
-                                        <text x={revLabelX} y={finalRevLabelY} textAnchor="end" fontSize="10" fill="#0F172A" fontWeight="800">
-                                          {formatSignedPct(item.revenue_uplift_pct, 1)}
-                                        </text>
-                                        <text
-                                          x={budgetLabelX}
-                                          y={finalBudgetLabelY}
-                                          textAnchor="start"
-                                          fontSize="10"
-                                          fill="#0F172A"
-                                          fontWeight="800"
-                                        >
-                                          {utilPct.toFixed(1)}%
-                                        </text>
-                                        <text x={centerX} y={chartHeight - 18} textAnchor="middle" fontSize="11" fill="#334155" fontWeight={isSelected ? '700' : '500'}>
-                                          {label}
-                                        </text>
-                                      </g>
-                                    )
-                                  })}
-                                  <line x1={left} x2={left} y1={top} y2={chartHeight - bottom} stroke="#94A3B8" />
-                                  <line x1={scenarioChartWidth - right} x2={scenarioChartWidth - right} y1={top} y2={chartHeight - bottom} stroke="#94A3B8" />
-                                  <line x1={left} x2={scenarioChartWidth - right} y1={chartHeight - bottom} y2={chartHeight - bottom} stroke="#94A3B8" />
-                                </>
-                              )
-                            })()}
-                          </svg>
+                                  <Bar
+                                    yAxisId="left"
+                                    dataKey="revenuePct"
+                                    fill="#22C55E"
+                                    barSize={24}
+                                    radius={[2, 2, 0, 0]}
+                                    onClick={(row: any) => {
+                                      if (row?.scenarioId) setSelectedScenarioId(row.scenarioId)
+                                    }}
+                                  >
+                                    <LabelList
+                                      dataKey="revenuePct"
+                                      position="top"
+                                      offset={6}
+                                      formatter={(value: unknown) => `${Number(value) >= 0 ? '+' : ''}${Number(value).toFixed(1)}%`}
+                                      style={{ fontSize: 12, fontWeight: 800, fill: '#0F172A' }}
+                                    />
+                                  </Bar>
+                                  <Bar
+                                    yAxisId="right"
+                                    dataKey="budgetUtilizedPct"
+                                    fill="#2563EB"
+                                    barSize={24}
+                                    radius={[2, 2, 0, 0]}
+                                    onClick={(row: any) => {
+                                      if (row?.scenarioId) setSelectedScenarioId(row.scenarioId)
+                                    }}
+                                  >
+                                    <LabelList
+                                      dataKey="budgetUtilizedPct"
+                                      position="top"
+                                      offset={6}
+                                      formatter={(value: unknown) => `${Number(value).toFixed(1)}%`}
+                                      style={{ fontSize: 12, fontWeight: 800, fill: '#0F172A' }}
+                                    />
+                                  </Bar>
+                                </BarChart>
+                              </ResponsiveContainer>
+                            )
+                          })()}
                           <div className="mt-2 flex items-center justify-center gap-4 text-xs text-slate-600">
                             <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-sm bg-green-500" />Revenue %</span>
                             <span className="inline-flex items-center gap-1"><span className="h-2.5 w-2.5 rounded-sm bg-primary" />Budget Utilized %</span>
@@ -3943,14 +4305,23 @@ function App() {
                           <p className="text-xs font-semibold text-slate-700">
                             Shift View: {selectedScenarioBudgetFlow.increased.length} increase markets | {selectedScenarioBudgetFlow.decreased.length} decrease markets
                           </p>
-                          <select
-                            value={scenarioFlowSortKey}
-                            onChange={(event) => setScenarioFlowSortKey(event.target.value === 'spend' ? 'spend' : 'share')}
-                            className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
-                          >
-                            <option value="share">Sort by Share Shift (pp)</option>
-                            <option value="spend">Sort by Spend Shift (INR Mn)</option>
-                          </select>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={handleSaveSelectedScenario}
+                              className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700"
+                            >
+                              Save Selected
+                            </button>
+                            <select
+                              value={scenarioFlowSortKey}
+                              onChange={(event) => setScenarioFlowSortKey(event.target.value === 'spend' ? 'spend' : 'share')}
+                              className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-semibold text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
+                            >
+                              <option value="share">Sort by Share Shift (pp)</option>
+                              <option value="spend">Sort by Spend Shift (INR Mn)</option>
+                            </select>
+                          </div>
                         </div>
 
                         <div className="mt-3 grid gap-3 lg:grid-cols-2">
@@ -4199,6 +4570,19 @@ function App() {
           )}
         </main>
       </div>
+      {notice ? (
+        <div className="fixed bottom-5 right-5 z-50">
+          <div
+            className={`rounded-lg border px-3 py-2 text-sm font-semibold shadow-lg ${
+              notice.type === 'success'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                : 'border-red-200 bg-red-50 text-red-700'
+            }`}
+          >
+            {notice.message}
+          </div>
+        </div>
+      ) : null}
       {renderScenarioMarketModal()}
       {renderAiModeModal()}
     </div>
