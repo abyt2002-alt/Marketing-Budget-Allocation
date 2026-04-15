@@ -613,7 +613,17 @@ type AppSnapshotPayload = {
   scenarioFlowSortKey: 'share' | 'spend'
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8020'
+const API_BASE_URL = (() => {
+  const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim()
+  if (envBase) {
+    return envBase.replace(/\/+$/, '')
+  }
+  if (typeof window !== 'undefined' && window.location.hostname) {
+    const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
+    return `${protocol}//${window.location.hostname}:8020`
+  }
+  return 'http://127.0.0.1:8020'
+})()
 const normalizeBrandKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '')
 const SCENARIO_PROGRESS_STAGES = [
   { key: 'queued', label: 'Queued', hint: 'Preparing run context and brand-market payload.', start: 0, end: 10 },
@@ -765,6 +775,39 @@ function App() {
     setNotice({ type, message })
   }
 
+  async function loadAutoConfig() {
+    setLoadingConfig(true)
+    setErrorMessage('')
+
+    try {
+      const response = await axios.get<AutoConfigResponse>(`${API_BASE_URL}/api/auto-config`)
+      const cfg = response.data
+      const nextBrandLookup: Record<string, string> = {}
+      for (const brand of Object.keys(cfg.markets_by_brand)) {
+        nextBrandLookup[normalizeBrandKey(brand)] = brand
+      }
+      const defaultBrand = cfg.default_brand || cfg.brands[0] || ''
+      const fallbackBrand = nextBrandLookup[normalizeBrandKey(selectedBrand)] ?? defaultBrand
+      const nextMarkets = cfg.markets_by_brand[fallbackBrand] ?? []
+
+      setConfig(cfg)
+      setSelectedBrand(fallbackBrand)
+      setSelectedMarkets((prev) => {
+        const retained = prev.filter((market) => nextMarkets.includes(market))
+        return retained.length > 0 ? retained : nextMarkets
+      })
+    } catch (error) {
+      setConfig(null)
+      if (axios.isAxiosError(error)) {
+        setErrorMessage(error.response?.data?.detail ?? 'Failed to auto-load configuration.')
+      } else {
+        setErrorMessage('Unexpected error while loading configuration.')
+      }
+    } finally {
+      setLoadingConfig(false)
+    }
+  }
+
   function getStep2BudgetInput() {
     if (!brandAllocation || !selectedBrand) {
       return { budget_increase_type: budgetType as 'percentage' | 'absolute', budget_increase_value: budgetValue }
@@ -853,31 +896,6 @@ function App() {
   }
 
   useEffect(() => {
-    async function loadAutoConfig() {
-      setLoadingConfig(true)
-      setErrorMessage('')
-
-      try {
-        const response = await axios.get<AutoConfigResponse>(`${API_BASE_URL}/api/auto-config`)
-        const cfg = response.data
-        setConfig(cfg)
-
-        const defaultBrand = cfg.default_brand || cfg.brands[0] || ''
-        const defaultMarkets = cfg.markets_by_brand[defaultBrand] ?? []
-
-        setSelectedBrand(defaultBrand)
-        setSelectedMarkets(defaultMarkets)
-      } catch (error) {
-        if (axios.isAxiosError(error)) {
-          setErrorMessage(error.response?.data?.detail ?? 'Failed to auto-load configuration.')
-        } else {
-          setErrorMessage('Unexpected error while loading configuration.')
-        }
-      } finally {
-        setLoadingConfig(false)
-      }
-    }
-
     void loadAutoConfig()
   }, [])
 
@@ -2904,17 +2922,34 @@ function App() {
             <button
               type="button"
               onClick={() => {
+                if (!config) {
+                  void loadAutoConfig()
+                  return
+                }
                 void loadSCurves()
                 void loadContributionInsights()
                 void loadYoyGrowth()
               }}
-              disabled={(sCurvesLoading || contributionLoading || yoyLoading) || !selectedBrand || !activeSCurveState}
+              disabled={config ? ((sCurvesLoading || contributionLoading || yoyLoading) || !selectedBrand || !activeSCurveState) : loadingConfig}
               className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {(sCurvesLoading || contributionLoading || yoyLoading) ? 'Refreshing...' : 'Refresh Insights'}
+              {!config ? (loadingConfig ? 'Loading...' : 'Retry Loading') : ((sCurvesLoading || contributionLoading || yoyLoading) ? 'Refreshing...' : 'Refresh Insights')}
             </button>
           </div>
         </div>
+
+        {errorMessage && !config ? (
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-danger/20 bg-danger/10 px-3 py-3 text-sm text-danger">
+            <span>{errorMessage}</span>
+            <button
+              type="button"
+              onClick={() => void loadAutoConfig()}
+              className="rounded-lg border border-danger/30 bg-white px-3 py-1.5 text-xs font-semibold text-danger"
+            >
+              Retry
+            </button>
+          </div>
+        ) : null}
 
         <div className="grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3 lg:grid-cols-[220px_minmax(0,1fr)]">
           <div className="rounded-lg border border-slate-200 bg-white p-3">
@@ -2934,6 +2969,11 @@ function App() {
                   {market}
                 </button>
               ))}
+              {!loadingConfig && sCurveStates.length === 0 ? (
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-2 text-xs text-slate-500">
+                  {selectedBrand ? 'No states available for this brand.' : 'Waiting for brand configuration.'}
+                </div>
+              ) : null}
             </div>
           </div>
           <div className="space-y-3">
