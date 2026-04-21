@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
+from app.services.engine import trigger_insights_cache_warmup
 
 
 def create_app() -> FastAPI:
@@ -25,4 +26,9 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(api_router)
+
+    @app.on_event("startup")
+    def _startup_warm_insights_cache() -> None:
+        trigger_insights_cache_warmup()
+
     return app

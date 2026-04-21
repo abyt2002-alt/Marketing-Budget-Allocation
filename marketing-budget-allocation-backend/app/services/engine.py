@@ -9,12 +9,13 @@ import re
 import threading
 import time
 import uuid
+import unicodedata
 from pathlib import Path
 from urllib import error as urlerror
 from urllib import request as urlrequest
 from typing import Any, Literal
 
-import numpy as np
+import numpy as np 
 import pandas as pd
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
@@ -25,6 +26,25 @@ BASE_DIR = Path(__file__).resolve().parents[3]
 RESULTS_DIR = Path(os.getenv("MBA_RESULTS_DIR", BASE_DIR / "results"))
 _AUTO_CONFIG_CACHE: dict | None = None
 _AUTO_CONFIG_SIGNATURE: tuple[tuple[str, int, int], ...] | None = None
+_INSIGHTS_CACHE_SIGNATURE: tuple[tuple[str, int, int], ...] | None = None
+_INSIGHTS_CACHE: dict[str, Any] = {}
+_INSIGHTS_CACHE_ORDER: list[str] = []
+_INSIGHTS_CACHE_MAX_ENTRIES = max(50, int(os.getenv("MBA_INSIGHTS_CACHE_MAX_ENTRIES", "600")))
+_INSIGHTS_CACHE_LOCK = threading.Lock()
+_INSIGHTS_WARMUP_ON_START = os.getenv("MBA_INSIGHTS_WARMUP_ON_START", "1").strip().lower() not in {"0", "false", "no"}
+_INSIGHTS_WARMUP_LOCK = threading.Lock()
+_INSIGHTS_WARMUP_THREAD: threading.Thread | None = None
+_INSIGHTS_WARMUP_STATUS: dict[str, Any] = {
+    "enabled": _INSIGHTS_WARMUP_ON_START,
+    "state": "idle",  # idle | queued | running | completed | failed | disabled
+    "started_at": None,
+    "completed_at": None,
+    "duration_seconds": None,
+    "total_pairs": 0,
+    "completed_pairs": 0,
+    "failed_pairs": 0,
+    "last_error": None,
+}
 SCENARIO_JOB_TTL_SECONDS = 24 * 60 * 60
 SCENARIO_TARGET_TOTAL = 1000
 SCENARIO_TARGET_DEFAULT = 1000
@@ -36,6 +56,7 @@ SCENARIO_BUDGET_BAND_LOWER_RATIO = 0.85
 SCENARIO_MAX_ATTEMPTS = 65000
 SCENARIO_PAGE_SIZE_DEFAULT = 25
 SCENARIO_PAGE_SIZE_MAX = 200
+REACH_SHARE_TARGET_TOLERANCE_PCT = 15.0
 _SCENARIO_JOBS: dict[str, dict[str, Any]] = {}
 _SCENARIO_JOBS_LOCK = threading.Lock()
 
@@ -63,10 +84,120 @@ class ScenarioJobCreateRequest(BaseModel):
     budget_increase_value: float = 5.0
     market_overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
     intent_prompt: str = ""
+    resolved_intent: dict[str, Any] | None = None
     scenario_budget_lower: float | None = None
     scenario_budget_upper: float | None = None
     target_scenarios: int = SCENARIO_TARGET_DEFAULT
     max_runtime_seconds: int = 900
+
+
+ScenarioMarketAction = Literal["increase", "decrease", "protect", "hold", "deprioritize", "rebalance", "recover"]
+ScenarioObjectivePreference = Literal["volume", "revenue", "balanced", "efficiency", "practical_mix"]
+
+
+class ScenarioIntentQuestion(BaseModel):
+    id: str
+    question: str
+    options: list[str] = Field(default_factory=list)
+    allow_free_text: bool = False
+
+
+class ScenarioInterpretedCondition(BaseModel):
+    metric_key: str
+    metric_label: str
+    qualifier_type: Literal["band", "trend"]
+    requested_direction: Literal["high", "low", "increasing", "decreasing"]
+    source_text: str = ""
+    matched_markets: list[str] = Field(default_factory=list)
+
+
+class ScenarioPlanEntity(BaseModel):
+    grain: str = "market"
+    scope: list[str] = Field(default_factory=list)
+    brand: str = ""
+
+
+class ScenarioMetricMapping(BaseModel):
+    prompt_term: str
+    metric_key: str
+    metric_label: str
+    source_column: str
+    match_type: str = "inferred"
+    interpretation: str = ""
+    confidence: float = 0.0
+
+
+class ScenarioLogicRule(BaseModel):
+    kind: str
+    label: str
+    metric_key: str = ""
+    operator: str = ""
+    value: str = ""
+    markets: list[str] = Field(default_factory=list)
+    rationale: str = ""
+
+
+class ScenarioOutputSpec(BaseModel):
+    output_type: str = "ranked_market_recommendations"
+    fields: list[str] = Field(default_factory=list)
+
+
+class ScenarioAnalysisPlan(BaseModel):
+    task_types: list[str] = Field(default_factory=list)
+    goal: str = ""
+    entity: ScenarioPlanEntity = Field(default_factory=ScenarioPlanEntity)
+    metric_mappings: list[ScenarioMetricMapping] = Field(default_factory=list)
+    qualification_logic: list[ScenarioLogicRule] = Field(default_factory=list)
+    prioritization_logic: list[ScenarioLogicRule] = Field(default_factory=list)
+    derived_metrics: list[str] = Field(default_factory=list)
+    grouping: list[str] = Field(default_factory=list)
+    segmentation: list[str] = Field(default_factory=list)
+    output: ScenarioOutputSpec = Field(default_factory=ScenarioOutputSpec)
+    assumptions: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    needs_review: bool = False
+    review_reason: list[str] = Field(default_factory=list)
+
+
+class ScenarioResolvedIntent(BaseModel):
+    analysis_plan: ScenarioAnalysisPlan = Field(default_factory=ScenarioAnalysisPlan)
+    primary_anchor_metrics: list[str] = Field(default_factory=list)
+    secondary_anchor_metrics: list[str] = Field(default_factory=list)
+    interpreted_conditions: list[ScenarioInterpretedCondition] = Field(default_factory=list)
+    interpretation_summary: str = ""
+    negative_filters: list[str] = Field(default_factory=list)
+    target_markets: list[str] = Field(default_factory=list)
+    protected_markets: list[str] = Field(default_factory=list)
+    held_markets: list[str] = Field(default_factory=list)
+    deprioritized_markets: list[str] = Field(default_factory=list)
+    action_preferences_by_market: dict[str, ScenarioMarketAction] = Field(default_factory=dict)
+    market_action_explanations: dict[str, str] = Field(default_factory=dict)
+    global_action_preference: ScenarioMarketAction = "hold"
+    objective_preference: ScenarioObjectivePreference = "balanced"
+    aggressiveness_level: Literal["low", "medium", "high"] = "medium"
+    practicality_level: Literal["high", "medium", "low"] = "medium"
+    confidence_score: float = 0.0
+    readiness_for_generation: bool = False
+    confirmation_required: bool = False
+    explanation_notes: list[str] = Field(default_factory=list)
+
+
+class ScenarioIntentResolveRequest(BaseModel):
+    selected_brand: str
+    selected_markets: list[str] = Field(default_factory=list)
+    budget_increase_type: Literal["percentage", "absolute"] = "percentage"
+    budget_increase_value: float = 5.0
+    market_overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
+    intent_prompt: str = ""
+
+
+class ScenarioIntentClarifyRequest(ScenarioIntentResolveRequest):
+    clarification_round: int = 1
+    clarification_answers: dict[str, str] = Field(default_factory=dict)
+
+
+class ScenarioIntentDebugRequest(ScenarioIntentResolveRequest):
+    pass
 
 
 class SCurveAutoRequest(BaseModel):
@@ -86,6 +217,13 @@ class ContributionAutoRequest(BaseModel):
 class YoyGrowthRequest(BaseModel):
     selected_brand: str
     selected_market: str = ""
+
+
+class DriverAnalysisRequest(BaseModel):
+    selected_brand: str
+    selected_market: str = ""
+    months_back: int = 3
+    top_n: int = 8
 
 
 class InsightsAIRequest(BaseModel):
@@ -127,6 +265,172 @@ def _results_signature(candidates: list[Path]) -> tuple[tuple[str, int, int], ..
     return tuple(out)
 
 
+def _insights_payload_cache_key(prefix: str, payload: BaseModel) -> str:
+    serialized = json.dumps(payload.model_dump(mode="json"), sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+    return f"{prefix}:{serialized}"
+
+
+def _refresh_insights_cache_if_stale_locked() -> None:
+    global _INSIGHTS_CACHE_SIGNATURE
+    signature = _results_signature(_list_result_files())
+    if _INSIGHTS_CACHE_SIGNATURE == signature:
+        return
+    _INSIGHTS_CACHE.clear()
+    _INSIGHTS_CACHE_ORDER.clear()
+    _INSIGHTS_CACHE_SIGNATURE = signature
+
+
+def _get_cached_insights_response(cache_key: str) -> Any | None:
+    with _INSIGHTS_CACHE_LOCK:
+        _refresh_insights_cache_if_stale_locked()
+        value = _INSIGHTS_CACHE.get(cache_key)
+        if value is None:
+            return None
+        try:
+            _INSIGHTS_CACHE_ORDER.remove(cache_key)
+        except ValueError:
+            pass
+        _INSIGHTS_CACHE_ORDER.append(cache_key)
+        return value
+
+
+def _set_cached_insights_response(cache_key: str, value: Any) -> None:
+    with _INSIGHTS_CACHE_LOCK:
+        _refresh_insights_cache_if_stale_locked()
+        _INSIGHTS_CACHE[cache_key] = value
+        try:
+            _INSIGHTS_CACHE_ORDER.remove(cache_key)
+        except ValueError:
+            pass
+        _INSIGHTS_CACHE_ORDER.append(cache_key)
+        while len(_INSIGHTS_CACHE_ORDER) > _INSIGHTS_CACHE_MAX_ENTRIES:
+            evicted = _INSIGHTS_CACHE_ORDER.pop(0)
+            _INSIGHTS_CACHE.pop(evicted, None)
+
+
+def _insights_warmup_status_snapshot() -> dict[str, Any]:
+    with _INSIGHTS_WARMUP_LOCK:
+        return dict(_INSIGHTS_WARMUP_STATUS)
+
+
+def _set_insights_warmup_status(**updates: Any) -> None:
+    with _INSIGHTS_WARMUP_LOCK:
+        _INSIGHTS_WARMUP_STATUS.update(updates)
+
+
+def _iter_brand_market_pairs_for_warmup(cfg: dict[str, Any]) -> list[tuple[str, str]]:
+    markets_by_brand = cfg.get("markets_by_brand", {}) or {}
+    default_brand = str(cfg.get("default_brand", "") or "")
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _append_pair(brand: str, market: str) -> None:
+        key = (brand, market)
+        if key in seen:
+            return
+        seen.add(key)
+        pairs.append(key)
+
+    if default_brand and default_brand in markets_by_brand:
+        for market in markets_by_brand.get(default_brand, []) or []:
+            _append_pair(default_brand, str(market))
+
+    for brand in sorted(markets_by_brand.keys()):
+        for market in markets_by_brand.get(brand, []) or []:
+            _append_pair(str(brand), str(market))
+    return pairs
+
+
+def _warm_insights_cache_worker() -> None:
+    started_at = time.time()
+    _set_insights_warmup_status(
+        state="running",
+        started_at=started_at,
+        completed_at=None,
+        duration_seconds=None,
+        completed_pairs=0,
+        failed_pairs=0,
+        last_error=None,
+    )
+    failed_pairs = 0
+    completed_pairs = 0
+    try:
+        cfg = _build_auto_config()
+        pairs = _iter_brand_market_pairs_for_warmup(cfg)
+        _set_insights_warmup_status(total_pairs=len(pairs))
+        for brand, market in pairs:
+            try:
+                service_s_curves_auto(
+                    SCurveAutoRequest(selected_brand=brand, selected_markets=[market], points=41, min_scale=0.2, max_scale=2.5)
+                )
+                service_contributions_auto(ContributionAutoRequest(selected_brand=brand, selected_market=market, top_n=8))
+                service_yoy_growth_auto(YoyGrowthRequest(selected_brand=brand, selected_market=market))
+                service_driver_analysis_auto(DriverAnalysisRequest(selected_brand=brand, selected_market=market, months_back=3, top_n=8))
+            except Exception as exc:  # noqa: BLE001
+                failed_pairs += 1
+                if failed_pairs <= 5:
+                    _set_insights_warmup_status(last_error=f"{brand} / {market}: {exc}")
+            finally:
+                completed_pairs += 1
+                _set_insights_warmup_status(completed_pairs=completed_pairs, failed_pairs=failed_pairs)
+        completed_at = time.time()
+        _set_insights_warmup_status(
+            state="completed" if failed_pairs == 0 else "completed",
+            completed_at=completed_at,
+            duration_seconds=round(completed_at - started_at, 3),
+            failed_pairs=failed_pairs,
+        )
+    except Exception as exc:  # noqa: BLE001
+        completed_at = time.time()
+        _set_insights_warmup_status(
+            state="failed",
+            completed_at=completed_at,
+            duration_seconds=round(completed_at - started_at, 3),
+            last_error=str(exc),
+        )
+    finally:
+        global _INSIGHTS_WARMUP_THREAD
+        with _INSIGHTS_WARMUP_LOCK:
+            _INSIGHTS_WARMUP_THREAD = None
+
+
+def trigger_insights_cache_warmup() -> dict[str, Any]:
+    """
+    Trigger non-blocking warmup for insights cache.
+    Used on app startup and auto-config calls so first user experience is faster.
+    """
+    if not _INSIGHTS_WARMUP_ON_START:
+        _set_insights_warmup_status(state="disabled", enabled=False)
+        return _insights_warmup_status_snapshot()
+
+    current_signature = _results_signature(_list_result_files())
+    global _INSIGHTS_WARMUP_THREAD
+    with _INSIGHTS_WARMUP_LOCK:
+        thread_alive = _INSIGHTS_WARMUP_THREAD is not None and _INSIGHTS_WARMUP_THREAD.is_alive()
+        current_state = str(_INSIGHTS_WARMUP_STATUS.get("state", "idle"))
+        if thread_alive or current_state in {"queued", "running"}:
+            return dict(_INSIGHTS_WARMUP_STATUS)
+        if current_state == "completed" and _INSIGHTS_CACHE_SIGNATURE == current_signature:
+            return dict(_INSIGHTS_WARMUP_STATUS)
+        _INSIGHTS_WARMUP_STATUS.update(
+            {
+                "enabled": True,
+                "state": "queued",
+                "started_at": None,
+                "completed_at": None,
+                "duration_seconds": None,
+                "total_pairs": 0,
+                "completed_pairs": 0,
+                "failed_pairs": 0,
+                "last_error": None,
+            }
+        )
+        worker = threading.Thread(target=_warm_insights_cache_worker, name="insights-cache-warmup", daemon=True)
+        _INSIGHTS_WARMUP_THREAD = worker
+        worker.start()
+        return dict(_INSIGHTS_WARMUP_STATUS)
+
+
 def _pick_file(candidates: list[Path], hints: tuple[str, ...], exts: set[str]) -> Path | None:
     filtered = [c for c in candidates if c.suffix.lower() in exts]
     for c in filtered:
@@ -148,6 +452,313 @@ def _detect_input_files() -> dict[str, Path | None]:
 def _detect_national_learnings_file() -> Path | None:
     c = _list_result_files()
     return _pick_file(c, ("india_level", "national", "elasticities", "all_brand_combined"), {".xlsx"})
+
+
+def _normalize_name_key(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    normalized = unicodedata.normalize("NFKD", raw)
+    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", "", ascii_text.lower())
+
+
+def _elasticity_responsiveness_label(overall: float | None, tv: float | None, digital: float | None) -> str:
+    candidates = [v for v in [overall, tv, digital] if v is not None and np.isfinite(v)]
+    if not candidates:
+        return "Unknown"
+    score = float(np.nanmean(np.array(candidates, dtype=float)))
+    if score >= 0.2:
+        return "High"
+    if score >= 0.08:
+        return "Medium"
+    return "Low"
+
+
+def _build_market_elasticity_guidance(
+    national_path: Path | None,
+    brand: str,
+    selected_markets: list[str],
+) -> dict[str, Any]:
+    guidance: dict[str, Any] = {
+        "source_file": national_path.name if national_path else None,
+        "sheet_name": None,
+        "brand": brand,
+        "matched_row_count": 0,
+        "rows": [],
+        "notes": [],
+    }
+    if national_path is None:
+        guidance["notes"] = ["National elasticity file not found in results."]
+        return guidance
+
+    try:
+        xls = pd.ExcelFile(national_path)
+    except Exception:
+        guidance["notes"] = ["Could not open national elasticity file."]
+        return guidance
+
+    target_brand_key = _normalize_name_key(brand)
+    candidate_sheets = [s for s in xls.sheet_names if _normalize_name_key(s) != _normalize_name_key("National level learnings")]
+    matched_sheet = next((s for s in candidate_sheets if _normalize_name_key(s) == target_brand_key), None)
+    if matched_sheet is None and candidate_sheets:
+        matched_sheet = next(
+            (s for s in candidate_sheets if target_brand_key and target_brand_key in _normalize_name_key(s)),
+            None,
+        )
+    if not matched_sheet:
+        guidance["notes"] = [f"No elasticity sheet found for brand '{brand}'."]
+        return guidance
+
+    guidance["sheet_name"] = matched_sheet
+    try:
+        df = pd.read_excel(national_path, sheet_name=matched_sheet)
+    except Exception:
+        guidance["notes"] = [f"Could not read sheet '{matched_sheet}'."]
+        return guidance
+
+    df.columns = [str(c).strip() for c in df.columns]
+    market_col = next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Market")), "")
+    overall_col = next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Overall media elasticity")), "")
+    tv_col = next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("TV_Reach_Elasticity")), "")
+    digital_col = next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Digital_Reach_Elasticity")), "")
+
+    if not market_col:
+        guidance["notes"] = [f"Sheet '{matched_sheet}' does not contain Market column."]
+        return guidance
+
+    selected_market_map = {_normalize_name_key(m): str(m).strip() for m in selected_markets if str(m).strip()}
+    rows: list[dict[str, Any]] = []
+    work = df.copy()
+    work["_market_key"] = work[market_col].astype(str).map(_normalize_name_key)
+    for _, row in work.iterrows():
+        mkey = str(row.get("_market_key", "")).strip()
+        if not mkey or mkey not in selected_market_map:
+            continue
+        market_name = selected_market_map[mkey]
+        overall = float(_finite(row.get(overall_col, np.nan), np.nan)) if overall_col else np.nan
+        tv = float(_finite(row.get(tv_col, np.nan), np.nan)) if tv_col else np.nan
+        digital = float(_finite(row.get(digital_col, np.nan), np.nan)) if digital_col else np.nan
+        overall_val = overall if np.isfinite(overall) else None
+        tv_val = tv if np.isfinite(tv) else None
+        digital_val = digital if np.isfinite(digital) else None
+        rows.append(
+            {
+                "market": market_name,
+                "overall_media_elasticity": None if overall_val is None else round(overall_val, 6),
+                "tv_reach_elasticity": None if tv_val is None else round(tv_val, 6),
+                "digital_reach_elasticity": None if digital_val is None else round(digital_val, 6),
+                "responsiveness_label": _elasticity_responsiveness_label(overall_val, tv_val, digital_val),
+            }
+        )
+
+    if rows:
+        order = {m: i for i, m in enumerate(selected_markets)}
+        rows = sorted(rows, key=lambda r: order.get(str(r.get("market", "")), 10**6))
+        guidance["matched_row_count"] = len(rows)
+        guidance["rows"] = rows
+        missing_markets = [m for m in selected_markets if m not in {str(r.get("market", "")) for r in rows}]
+        if missing_markets:
+            guidance["notes"] = [f"Elasticity guidance missing for {len(missing_markets)} selected markets."]
+    else:
+        guidance["notes"] = [f"No elasticity rows matched selected markets for brand '{brand}'."]
+    return guidance
+
+
+def _detect_market_intelligence_file() -> Path | None:
+    preferred = BASE_DIR / "MMM (1).xlsx"
+    if preferred.exists() and preferred.is_file():
+        return preferred
+    candidates = [BASE_DIR / "MMM.xlsx", BASE_DIR / "MMM 1.xlsx"]
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
+def _normalize_percent_like(value: Any) -> float | None:
+    try:
+        raw = float(value)
+    except Exception:
+        return None
+    if not np.isfinite(raw):
+        return None
+    if abs(raw) <= 1.5:
+        raw *= 100.0
+    return float(raw)
+
+
+def _compute_relative_metric_bands(values: list[float]) -> tuple[float, float]:
+    if not values:
+        return 0.0, 0.0
+    arr = np.array(values, dtype=float)
+    return float(np.percentile(arr, 33.3333)), float(np.percentile(arr, 66.6667))
+
+
+def _assign_relative_band(value: float | None, low_cut: float, high_cut: float) -> str:
+    if value is None or not np.isfinite(value):
+        return "unknown"
+    if value <= low_cut:
+        return "low"
+    if value >= high_cut:
+        return "high"
+    return "medium"
+
+
+def _compute_momentum_band(value: float | None, abs_values: list[float]) -> str:
+    if value is None or not np.isfinite(value):
+        return "unknown"
+    magnitude = abs(float(value))
+    non_zero = [v for v in abs_values if np.isfinite(v) and abs(v) > 1e-9]
+    if not non_zero:
+        return "neutral"
+    mild_cut = float(np.percentile(np.array(non_zero, dtype=float), 33.3333))
+    strong_cut = float(np.percentile(np.array(non_zero, dtype=float), 66.6667))
+    neutral_cut = max(0.1, mild_cut * 0.5)
+    if magnitude < neutral_cut:
+        return "neutral"
+    if value > 0:
+        return "strong_positive" if magnitude >= strong_cut else "mild_positive"
+    if value < 0:
+        return "strong_negative" if magnitude >= strong_cut else "mild_negative"
+    return "neutral"
+
+
+def _build_market_intelligence_guidance(
+    brand: str,
+    selected_markets: list[str],
+    market_data: dict[str, dict[str, Any]],
+    elasticity_guidance: dict[str, Any] | None = None,
+    overrides: dict[str, dict[str, float]] | None = None,
+) -> dict[str, Any]:
+    guidance: dict[str, Any] = {
+        "source_file": None,
+        "sheet_name": "GERC Market-Level",
+        "brand": brand,
+        "matched_row_count": 0,
+        "rows": [],
+        "notes": [],
+    }
+    path = _detect_market_intelligence_file()
+    if path is None:
+        guidance["notes"] = ["Market intelligence workbook not found."]
+        return guidance
+    guidance["source_file"] = path.name
+    try:
+        df = pd.read_excel(path, sheet_name="GERC Market-Level")
+    except Exception:
+        guidance["notes"] = ["Could not read market intelligence workbook sheet 'GERC Market-Level'."]
+        return guidance
+
+    df.columns = [str(c).strip() for c in df.columns]
+    required_cols = {
+        "brand": next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Brand")), ""),
+        "market": next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Market")), ""),
+        "category_salience": next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Category salience")), ""),
+        "brand_salience": next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Brand salience")), ""),
+        "market_share": next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Market share")), ""),
+        "change_in_market_share": next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Change in market share")), ""),
+        "change_in_brand_equity": next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Change in brand equity")), ""),
+    }
+    if not required_cols["market"]:
+        guidance["notes"] = ["Market intelligence sheet is missing Market column."]
+        return guidance
+
+    work = df.copy()
+    work["_market_key"] = work[required_cols["market"]].astype(str).map(_normalize_name_key)
+    selected_market_map = {_normalize_name_key(m): str(m).strip() for m in selected_markets if str(m).strip()}
+    filtered = work[work["_market_key"].isin(set(selected_market_map.keys()))].copy()
+    if not filtered.empty:
+        filtered = filtered.drop_duplicates(subset=["_market_key"], keep="first")
+    if filtered.empty:
+        guidance["notes"] = ["No market intelligence rows matched the selected markets in the shared market-level MMM sheet."]
+        return guidance
+
+    elasticity_map = {
+        str(row.get("market", "")).strip(): row
+        for row in (elasticity_guidance or {}).get("rows", [])
+        if isinstance(row, dict) and str(row.get("market", "")).strip()
+    }
+    rows: list[dict[str, Any]] = []
+    for _, row in filtered.iterrows():
+        market_name = selected_market_map.get(str(row.get("_market_key", "")).strip(), "")
+        if not market_name:
+            continue
+        md = market_data.get(market_name, {})
+        elasticity_row = elasticity_map.get(market_name, {})
+        avg_cpr = float(
+            np.nanmean(
+                np.array(
+                    [
+                        float(_finite(md.get("tv_cpr", np.nan), np.nan)),
+                        float(_finite(md.get("digital_cpr", np.nan), np.nan)),
+                    ],
+                    dtype=float,
+                )
+            )
+        ) if md else np.nan
+        target_reach_share_raw = _finite(((overrides or {}).get(market_name, {}) or {}).get("target_reach_share_pct"), np.nan)
+        target_reach_share_pct = float(target_reach_share_raw) if np.isfinite(target_reach_share_raw) else None
+        rows.append(
+            {
+                "market": market_name,
+                "category_salience": _normalize_percent_like(row.get(required_cols["category_salience"])),
+                "brand_salience": _normalize_percent_like(row.get(required_cols["brand_salience"])),
+                "market_share": _normalize_percent_like(row.get(required_cols["market_share"])),
+                "change_in_market_share": _normalize_percent_like(row.get(required_cols["change_in_market_share"])),
+                "change_in_brand_equity": _normalize_percent_like(row.get(required_cols["change_in_brand_equity"])),
+                "overall_media_elasticity": _finite(elasticity_row.get("overall_media_elasticity", np.nan), np.nan),
+                "tv_reach_elasticity": _finite(elasticity_row.get("tv_reach_elasticity", np.nan), np.nan),
+                "digital_reach_elasticity": _finite(elasticity_row.get("digital_reach_elasticity", np.nan), np.nan),
+                "responsiveness_label": str(elasticity_row.get("responsiveness_label", "Unknown")),
+                "tv_cpr": float(_finite(md.get("tv_cpr", np.nan), np.nan)),
+                "digital_cpr": float(_finite(md.get("digital_cpr", np.nan), np.nan)),
+                "avg_cpr": avg_cpr if np.isfinite(avg_cpr) else None,
+                "target_reach_share_pct": target_reach_share_pct,
+            }
+        )
+
+    order = {m: i for i, m in enumerate(selected_markets)}
+    rows = sorted(rows, key=lambda r: order.get(str(r.get("market", "")), 10**6))
+    if not rows:
+        guidance["notes"] = ["No market intelligence rows matched the selected markets in the shared market-level MMM sheet."]
+        return guidance
+
+    for metric_key in ("category_salience", "brand_salience", "market_share"):
+        metric_vals = [float(v) for v in [r.get(metric_key) for r in rows] if v is not None and np.isfinite(v)]
+        low_cut, high_cut = _compute_relative_metric_bands(metric_vals)
+        for item in rows:
+            item[f"{metric_key}_band"] = _assign_relative_band(
+                float(item[metric_key]) if item.get(metric_key) is not None else None,
+                low_cut,
+                high_cut,
+            )
+
+    for metric_key in ("change_in_market_share", "change_in_brand_equity"):
+        abs_vals = [abs(float(v)) for v in [r.get(metric_key) for r in rows] if v is not None and np.isfinite(v)]
+        for item in rows:
+            metric_val = float(item[metric_key]) if item.get(metric_key) is not None else None
+            item[f"{metric_key}_band"] = _compute_momentum_band(metric_val, abs_vals)
+
+    avg_cpr_vals = [float(v) for v in [r.get("avg_cpr") for r in rows] if v is not None and np.isfinite(v)]
+    low_cut, high_cut = _compute_relative_metric_bands(avg_cpr_vals)
+    for item in rows:
+        avg_cpr = float(item["avg_cpr"]) if item.get("avg_cpr") is not None else None
+        band = _assign_relative_band(avg_cpr, low_cut, high_cut)
+        if band == "high":
+            item["avg_cpr_band"] = "high_cost"
+        elif band == "low":
+            item["avg_cpr_band"] = "low_cost"
+        else:
+            item["avg_cpr_band"] = "mid_cost" if band == "medium" else "unknown"
+
+    guidance["matched_row_count"] = len(rows)
+    guidance["rows"] = rows
+    missing_markets = [m for m in selected_markets if m not in {str(r.get("market", "")) for r in rows}]
+    guidance["notes"] = ["Using shared market-level MMM guidance across brands."]
+    if missing_markets:
+        guidance["notes"].append(f"Market intelligence missing for {len(missing_markets)} selected markets.")
+    return guidance
 
 
 def _read_brand_market_map(market_weights_path: Path) -> dict[str, list[str]]:
@@ -1180,17 +1791,84 @@ def _budget_constraint(v: np.ndarray, market_data: dict[str, dict[str, Any]], re
     return B - total_spend
 
 
+def _extract_target_reach_share_overrides(
+    regions: list[str],
+    overrides: dict[str, dict[str, float]] | None,
+) -> dict[str, float]:
+    out: dict[str, float] = {}
+    if not overrides:
+        return out
+    region_set = {str(r).strip() for r in regions}
+    for region, values in overrides.items():
+        r = str(region).strip()
+        if r not in region_set or not isinstance(values, dict):
+            continue
+        raw = _finite(values.get("target_reach_share_pct"), np.nan)
+        if not np.isfinite(raw):
+            continue
+        out[r] = float(min(max(raw, 0.0), 100.0))
+    return out
+
+
+def _is_reach_share_targets_satisfied(
+    vector: np.ndarray,
+    market_data: dict[str, dict[str, Any]],
+    regions: list[str],
+    overrides: dict[str, dict[str, float]] | None,
+    tolerance_pct: float = REACH_SHARE_TARGET_TOLERANCE_PCT,
+) -> bool:
+    target_map = _extract_target_reach_share_overrides(regions, overrides)
+    if not target_map:
+        return True
+    reaches: list[float] = []
+    total_reach = 0.0
+    for idx, region in enumerate(regions):
+        md = market_data[region]
+        tv_base = float(np.sum(md["r_tv_list"]))
+        dg_base = float(np.sum(md["r_dig_list"]))
+        reach = tv_base * (1.0 + float(vector[2 * idx])) + dg_base * (1.0 + float(vector[2 * idx + 1]))
+        reach = max(0.0, float(reach))
+        reaches.append(reach)
+        total_reach += reach
+    if total_reach <= 1e-12:
+        return False
+    tol = max(0.0, float(tolerance_pct)) / 100.0
+    for idx, region in enumerate(regions):
+        if region not in target_map:
+            continue
+        target = float(target_map[region]) / 100.0
+        lower = max(0.0, target - tol)
+        upper = min(1.0, target + tol)
+        share = reaches[idx] / total_reach
+        if share < lower - 1e-6 or share > upper + 1e-6:
+            return False
+    return True
+
+
 def _build_constraints(
     market_data: dict[str, dict[str, Any]],
     regions: list[str],
     B: float,
     limits_map: dict[str, dict[str, float | None]],
+    overrides: dict[str, dict[str, float]] | None = None,
 ) -> list[dict[str, Any]]:
     cons: list[dict[str, Any]] = [{"type": "eq", "fun": lambda v: _budget_constraint(v, market_data, regions, B)}]
     tv_low, tv_high, dg_low, dg_high = 0.001, 3.0, 0.001, 4.0
+    tv_bases = [float(np.sum(market_data[region]["r_tv_list"])) for region in regions]
+    dg_bases = [float(np.sum(market_data[region]["r_dig_list"])) for region in regions]
+
+    def _total_reach(v: np.ndarray, tv_vals: list[float], dg_vals: list[float]) -> float:
+        total = 0.0
+        for idx in range(len(tv_vals)):
+            total += tv_vals[idx] * (1.0 + float(v[2 * idx])) + dg_vals[idx] * (1.0 + float(v[2 * idx + 1]))
+        return float(total)
+
+    def _market_reach(v: np.ndarray, idx: int, tv_vals: list[float], dg_vals: list[float]) -> float:
+        return float(tv_vals[idx] * (1.0 + float(v[2 * idx])) + dg_vals[idx] * (1.0 + float(v[2 * idx + 1])))
+
     for i, region in enumerate(regions):
         md = market_data[region]
-        tv_base, dg_base = float(np.sum(md["r_tv_list"])), float(np.sum(md["r_dig_list"]))
+        tv_base, dg_base = tv_bases[i], dg_bases[i]
         tv_cpr, dg_cpr = float(md["tv_cpr"]), float(md["digital_cpr"])
         cons.append({"type": "ineq", "fun": lambda v, i=i, b=tv_base, c=tv_cpr: (b * (1.0 + v[2 * i]) * c) - (b * c * tv_low)})
         cons.append({"type": "ineq", "fun": lambda v, i=i, b=tv_base, c=tv_cpr: (b * c * tv_high) - (b * (1.0 + v[2 * i]) * c)})
@@ -1205,6 +1883,34 @@ def _build_constraints(
         cons.append({"type": "ineq", "fun": lambda v, i=i, b=tv_base, lb=tv_min: (b * (1.0 + v[2 * i])) - lb + 1e-3})
         cons.append({"type": "ineq", "fun": lambda v, i=i, b=dg_base, ub=dg_max: ub - (b * (1.0 + v[2 * i + 1])) + 1e-3})
         cons.append({"type": "ineq", "fun": lambda v, i=i, b=dg_base, lb=dg_min: (b * (1.0 + v[2 * i + 1])) - lb + 1e-3})
+
+    target_share_map = _extract_target_reach_share_overrides(regions, overrides)
+    if target_share_map:
+        tol = max(0.0, REACH_SHARE_TARGET_TOLERANCE_PCT) / 100.0
+        region_index = {region: idx for idx, region in enumerate(regions)}
+        for region, target_pct in target_share_map.items():
+            idx = region_index.get(region)
+            if idx is None:
+                continue
+            target = float(target_pct) / 100.0
+            lower = max(0.0, target - tol)
+            upper = min(1.0, target + tol)
+            cons.append(
+                {
+                    "type": "ineq",
+                    "fun": lambda v, idx=idx, lb=lower, tv_vals=tv_bases, dg_vals=dg_bases: _market_reach(v, idx, tv_vals, dg_vals)
+                    - (lb * _total_reach(v, tv_vals, dg_vals))
+                    + 1e-6,
+                }
+            )
+            cons.append(
+                {
+                    "type": "ineq",
+                    "fun": lambda v, idx=idx, ub=upper, tv_vals=tv_bases, dg_vals=dg_bases: (ub * _total_reach(v, tv_vals, dg_vals))
+                    - _market_reach(v, idx, tv_vals, dg_vals)
+                    + 1e-6,
+                }
+            )
     return cons
 
 
@@ -1213,13 +1919,14 @@ def _run_solver_with_objective(
     regions: list[str],
     B: float,
     limits_map: dict[str, dict[str, float | None]],
+    overrides: dict[str, dict[str, float]] | None,
     objective_fn: Any,
     objective_args: tuple[Any, ...] = (),
 ) -> tuple[np.ndarray, dict[str, Any]]:
     n_vars = 2 * len(regions)
     x0 = np.zeros(n_vars, dtype=float)
     bounds = [(-0.999, 4.0)] * n_vars
-    cons = _build_constraints(market_data, regions, B, limits_map)
+    cons = _build_constraints(market_data, regions, B, limits_map, overrides=overrides)
     args = (market_data, regions, *objective_args)
     res = minimize(
         objective_fn,
@@ -1252,12 +1959,14 @@ def _run_solver(
     regions: list[str],
     B: float,
     limits_map: dict[str, dict[str, float | None]],
+    overrides: dict[str, dict[str, float]] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     return _run_solver_with_objective(
         market_data=market_data,
         regions=regions,
         B=B,
         limits_map=limits_map,
+        overrides=overrides,
         objective_fn=_objective,
     )
 
@@ -1311,6 +2020,19 @@ def _load_optimization_context(payload: OptimizeAutoRequest) -> dict[str, Any]:
     max_reach_df = _read_max_reach(max_path, brand)
     regions = list(market_data.keys())
     limits_map = _build_market_limits_map(market_data, regions, max_reach_df, overrides)
+    national_path = _detect_national_learnings_file()
+    market_elasticity_guidance = _build_market_elasticity_guidance(
+        national_path=national_path,
+        brand=brand,
+        selected_markets=regions,
+    )
+    market_intelligence_guidance = _build_market_intelligence_guidance(
+        brand=brand,
+        selected_markets=regions,
+        market_data=market_data,
+        elasticity_guidance=market_elasticity_guidance,
+        overrides=overrides,
+    )
 
     return {
         "files": files,
@@ -1324,6 +2046,8 @@ def _load_optimization_context(payload: OptimizeAutoRequest) -> dict[str, Any]:
         "limits_map": limits_map,
         "overrides": overrides,
         "payload": payload,
+        "market_elasticity_guidance": market_elasticity_guidance,
+        "market_intelligence_guidance": market_intelligence_guidance,
     }
 
 
@@ -1594,6 +2318,7 @@ def _evaluate_solution_vector(
     regions: list[str],
     limits_map: dict[str, dict[str, float | None]],
     region_prices: dict[str, float] | None = None,
+    overrides: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     total_prev, total_new, total_spend = 0.0, 0.0, 0.0
@@ -1601,6 +2326,10 @@ def _evaluate_solution_vector(
     total_baseline_revenue = 0.0
     total_new_revenue = 0.0
     market_new_spend: dict[str, float] = {}
+    market_old_reach: dict[str, float] = {}
+    market_new_reach: dict[str, float] = {}
+    total_old_reach = 0.0
+    total_new_reach = 0.0
 
     for i, region in enumerate(regions):
         md = market_data[region]
@@ -1611,10 +2340,16 @@ def _evaluate_solution_vector(
         new_dg = base_dg * (1.0 + y)
         new_tv_total, new_dg_total = float(np.sum(new_tv)), float(np.sum(new_dg))
         old_tv_total, old_dg_total = float(np.sum(base_tv)), float(np.sum(base_dg))
+        old_total_reach = old_tv_total + old_dg_total
+        new_total_reach = new_tv_total + new_dg_total
         new_tv_sp = new_tv_total * float(md["tv_cpr"])
         new_dg_sp = new_dg_total * float(md["digital_cpr"])
         new_sp = new_tv_sp + new_dg_sp
         market_new_spend[region] = new_sp
+        market_old_reach[region] = old_total_reach
+        market_new_reach[region] = new_total_reach
+        total_old_reach += old_total_reach
+        total_new_reach += new_total_reach
 
         prev_vol = float(md["prev_vol"])
         new_vol = _predict_region_volume(md, x, y)
@@ -1639,6 +2374,11 @@ def _evaluate_solution_vector(
         revenue_uplift_pct = (revenue_uplift_abs / baseline_revenue * 100.0) if baseline_revenue > 1e-12 else 0.0
 
         lim = limits_map.get(region, {})
+        ov = (overrides or {}).get(region, {}) if isinstance(overrides, dict) else {}
+        target_reach_share_raw = _finite((ov or {}).get("target_reach_share_pct"), np.nan)
+        target_reach_share_pct = float(min(max(target_reach_share_raw, 0.0), 100.0)) if np.isfinite(target_reach_share_raw) else None
+        target_reach_share_min_pct = max(0.0, target_reach_share_pct - REACH_SHARE_TARGET_TOLERANCE_PCT) if target_reach_share_pct is not None else None
+        target_reach_share_max_pct = min(100.0, target_reach_share_pct + REACH_SHARE_TARGET_TOLERANCE_PCT) if target_reach_share_pct is not None else None
         rows.append(
             {
                 "market": region,
@@ -1653,10 +2393,17 @@ def _evaluate_solution_vector(
                 "new_annual_digital_reach": round(new_dg_total, 2),
                 "fy25_tv_reach": round(old_tv_total, 2),
                 "fy25_digital_reach": round(old_dg_total, 2),
+                "new_total_reach": round(new_total_reach, 2),
+                "fy25_total_reach": round(old_total_reach, 2),
+                "new_reach_share_pct": 0.0,
+                "fy25_reach_share_pct": 0.0,
                 "new_tv_share": round(tv_split, 4),
                 "new_digital_share": round(dg_split, 4),
                 "fy25_tv_share": round(old_tv_share, 4),
                 "fy25_digital_share": round(old_dg_share, 4),
+                "target_reach_share_pct": None if target_reach_share_pct is None else round(target_reach_share_pct, 2),
+                "target_reach_share_min_pct": None if target_reach_share_min_pct is None else round(target_reach_share_min_pct, 2),
+                "target_reach_share_max_pct": None if target_reach_share_max_pct is None else round(target_reach_share_max_pct, 2),
                 "max_annual_tv_reach": None if lim.get("tv_max_reach") is None else round(float(lim["tv_max_reach"]), 2),
                 "min_annual_tv_reach": None if lim.get("tv_min_reach") is None else round(float(lim["tv_min_reach"]), 2),
                 "max_annual_digital_reach": None if lim.get("dg_max_reach") is None else round(float(lim["dg_max_reach"]), 2),
@@ -1705,6 +2452,13 @@ def _evaluate_solution_vector(
     uplift_pct = ((total_new - total_prev) / total_prev * 100.0) if abs(total_prev) > 1e-12 else 0.0
     revenue_uplift_abs = total_new_revenue - total_baseline_revenue
     revenue_uplift_pct = (revenue_uplift_abs / total_baseline_revenue * 100.0) if total_baseline_revenue > 1e-12 else 0.0
+    if total_old_reach > 1e-12 or total_new_reach > 1e-12:
+        for row in rows:
+            region = str(row["market"])
+            old_reach = float(_finite(market_old_reach.get(region, 0.0), 0.0))
+            new_reach = float(_finite(market_new_reach.get(region, 0.0), 0.0))
+            row["fy25_reach_share_pct"] = round((old_reach / total_old_reach) * 100.0, 2) if total_old_reach > 1e-12 else 0.0
+            row["new_reach_share_pct"] = round((new_reach / total_new_reach) * 100.0, 2) if total_new_reach > 1e-12 else 0.0
     return {
         "rows": rows,
         "total_prev_volume": float(total_prev),
@@ -1729,9 +2483,10 @@ def _optimize_real(payload: OptimizeAutoRequest) -> dict[str, Any]:
     regions = ctx["regions"]
     market_data = ctx["market_data"]
     limits_map = ctx["limits_map"]
+    overrides = ctx.get("overrides", {})
     baseline_budget = float(ctx["baseline_budget"])
     B = float(ctx["target_budget"])
-    sol, meta = _run_solver(market_data, regions, B, limits_map)
+    sol, meta = _run_solver(market_data, regions, B, limits_map, overrides=ctx.get("overrides", {}))
 
     rows: list[dict[str, Any]] = []
     total_prev, total_new, total_spend = 0.0, 0.0, 0.0
@@ -1739,6 +2494,9 @@ def _optimize_real(payload: OptimizeAutoRequest) -> dict[str, Any]:
     market_new_spend: dict[str, float] = {}
     market_new_tv_spend: dict[str, float] = {}
     market_new_dg_spend: dict[str, float] = {}
+    market_old_reach: dict[str, float] = {}
+    market_new_reach: dict[str, float] = {}
+    total_old_reach = 0.0
     total_new_reach = 0.0
 
     for i, region in enumerate(regions):
@@ -1750,12 +2508,17 @@ def _optimize_real(payload: OptimizeAutoRequest) -> dict[str, Any]:
         new_dg = base_dg * (1.0 + y)
         new_tv_total, new_dg_total = float(np.sum(new_tv)), float(np.sum(new_dg))
         old_tv_total, old_dg_total = float(np.sum(base_tv)), float(np.sum(base_dg))
+        old_total_reach = old_tv_total + old_dg_total
+        new_total_reach_market = new_tv_total + new_dg_total
         new_tv_sp = new_tv_total * float(md["tv_cpr"])
         new_dg_sp = new_dg_total * float(md["digital_cpr"])
         new_sp = new_tv_sp + new_dg_sp
         market_new_spend[region] = new_sp
         market_new_tv_spend[region] = new_tv_sp
         market_new_dg_spend[region] = new_dg_sp
+        market_old_reach[region] = old_total_reach
+        market_new_reach[region] = new_total_reach_market
+        total_old_reach += old_total_reach
 
         ad_tv, ad_dg = adstock_function(new_tv, md["carryover_tv"]), adstock_function(new_dg, md["carryover_digital"])
         x_ad, y_ad = float(np.mean(ad_tv)) if len(ad_tv) else 0.0, float(np.mean(ad_dg)) if len(ad_dg) else 0.0
@@ -1787,6 +2550,11 @@ def _optimize_real(payload: OptimizeAutoRequest) -> dict[str, Any]:
         tv_max_spend = lim.get("max_tv_spend")
         dg_min_spend = lim.get("min_digital_spend")
         dg_max_spend = lim.get("max_digital_spend")
+        ov = overrides.get(region, {}) if isinstance(overrides, dict) else {}
+        target_reach_share_raw = _finite((ov or {}).get("target_reach_share_pct"), np.nan)
+        target_reach_share_pct = float(min(max(target_reach_share_raw, 0.0), 100.0)) if np.isfinite(target_reach_share_raw) else None
+        target_reach_share_min_pct = max(0.0, target_reach_share_pct - REACH_SHARE_TARGET_TOLERANCE_PCT) if target_reach_share_pct is not None else None
+        target_reach_share_max_pct = min(100.0, target_reach_share_pct + REACH_SHARE_TARGET_TOLERANCE_PCT) if target_reach_share_pct is not None else None
 
         rows.append({
             "market": region,
@@ -1801,10 +2569,17 @@ def _optimize_real(payload: OptimizeAutoRequest) -> dict[str, Any]:
             "new_annual_digital_reach": round(new_dg_total, 2),
             "fy25_tv_reach": round(old_tv_total, 2),
             "fy25_digital_reach": round(old_dg_total, 2),
+            "new_total_reach": round(new_total_reach_market, 2),
+            "fy25_total_reach": round(old_total_reach, 2),
+            "new_reach_share_pct": 0.0,
+            "fy25_reach_share_pct": 0.0,
             "new_tv_share": round(tv_split, 4),
             "new_digital_share": round(dg_split, 4),
             "fy25_tv_share": round(old_tv_share, 4),
             "fy25_digital_share": round(old_dg_share, 4),
+            "target_reach_share_pct": None if target_reach_share_pct is None else round(target_reach_share_pct, 2),
+            "target_reach_share_min_pct": None if target_reach_share_min_pct is None else round(target_reach_share_min_pct, 2),
+            "target_reach_share_max_pct": None if target_reach_share_max_pct is None else round(target_reach_share_max_pct, 2),
             "max_annual_tv_reach": None if tv_max_reach is None else round(float(tv_max_reach), 2),
             "min_annual_tv_reach": None if tv_min_reach is None else round(float(tv_min_reach), 2),
             "max_annual_digital_reach": None if dg_max_reach is None else round(float(dg_max_reach), 2),
@@ -1829,7 +2604,7 @@ def _optimize_real(payload: OptimizeAutoRequest) -> dict[str, Any]:
         total_prev += prev_vol
         total_new += new_vol
         total_spend += new_sp
-        total_new_reach += new_tv_total + new_dg_total
+        total_new_reach += new_total_reach_market
         weighted_tv += new_sp * tv_split
         weighted_dg += new_sp * dg_split
 
@@ -1838,6 +2613,13 @@ def _optimize_real(payload: OptimizeAutoRequest) -> dict[str, Any]:
             r["new_budget_share"] = round(market_new_spend[r["market"]] / total_spend, 4)
             old_sp = r["old_total_spend"]
             r["extra_budget_share"] = round(((r["new_total_spend"] - old_sp) / (total_spend - baseline_budget)) if abs(total_spend - baseline_budget) > 1e-12 else 0.0, 4)
+    if total_old_reach > 1e-12 or total_new_reach > 1e-12:
+        for r in rows:
+            region = str(r["market"])
+            old_reach = float(_finite(market_old_reach.get(region, 0.0), 0.0))
+            new_reach = float(_finite(market_new_reach.get(region, 0.0), 0.0))
+            r["fy25_reach_share_pct"] = round((old_reach / total_old_reach) * 100.0, 2) if total_old_reach > 1e-12 else 0.0
+            r["new_reach_share_pct"] = round((new_reach / total_new_reach) * 100.0, 2) if total_new_reach > 1e-12 else 0.0
 
     uplift_pct = ((total_new - total_prev) / total_prev * 100.0) if abs(total_prev) > 1e-12 else 0.0
     budget_constraint_val = _budget_constraint(sol, market_data, regions, B)
@@ -1880,6 +2662,8 @@ def _constraints_preview(payload: OptimizeAutoRequest) -> dict[str, Any]:
     regions = ctx["regions"]
     market_data = ctx["market_data"]
     limits_map = ctx["limits_map"]
+    overrides = ctx.get("overrides", {})
+    market_elasticity_guidance = dict(ctx.get("market_elasticity_guidance", {}) or {})
     baseline_budget = float(ctx["baseline_budget"])
     target_budget = float(ctx["target_budget"])
     bounds, coeffs, baseline_from_bounds = _build_variable_bounds_and_coeffs(market_data, regions, limits_map)
@@ -1894,6 +2678,7 @@ def _constraints_preview(payload: OptimizeAutoRequest) -> dict[str, Any]:
     total_spend = 0.0
     weighted_tv = 0.0
     weighted_dg = 0.0
+    total_baseline_reach = 0.0
 
     for region in regions:
         md = market_data[region]
@@ -1902,9 +2687,15 @@ def _constraints_preview(payload: OptimizeAutoRequest) -> dict[str, Any]:
         tv_sp = tv_reach * float(md["tv_cpr"])
         dg_sp = dg_reach * float(md["digital_cpr"])
         total = tv_sp + dg_sp
+        total_reach = tv_reach + dg_reach
         tv_split = tv_reach / (tv_reach + dg_reach) if (tv_reach + dg_reach) > 0 else 0.0
         dg_split = 1.0 - tv_split
         lim = limits_map.get(region, {})
+        ov = overrides.get(region, {}) if isinstance(overrides, dict) else {}
+        target_reach_share_raw = _finite((ov or {}).get("target_reach_share_pct"), np.nan)
+        target_reach_share_pct = float(min(max(target_reach_share_raw, 0.0), 100.0)) if np.isfinite(target_reach_share_raw) else None
+        target_reach_share_min_pct = max(0.0, target_reach_share_pct - REACH_SHARE_TARGET_TOLERANCE_PCT) if target_reach_share_pct is not None else None
+        target_reach_share_max_pct = min(100.0, target_reach_share_pct + REACH_SHARE_TARGET_TOLERANCE_PCT) if target_reach_share_pct is not None else None
 
         rows.append({
             "market": region,
@@ -1919,10 +2710,15 @@ def _constraints_preview(payload: OptimizeAutoRequest) -> dict[str, Any]:
             "new_annual_digital_reach": round(dg_reach, 2),
             "fy25_tv_reach": round(tv_reach, 2),
             "fy25_digital_reach": round(dg_reach, 2),
+            "fy25_total_reach": round(total_reach, 2),
+            "fy25_reach_share_pct": 0.0,
             "new_tv_share": round(tv_split, 4),
             "new_digital_share": round(dg_split, 4),
             "fy25_tv_share": round(tv_split, 4),
             "fy25_digital_share": round(dg_split, 4),
+            "target_reach_share_pct": None if target_reach_share_pct is None else round(target_reach_share_pct, 2),
+            "target_reach_share_min_pct": None if target_reach_share_min_pct is None else round(target_reach_share_min_pct, 2),
+            "target_reach_share_max_pct": None if target_reach_share_max_pct is None else round(target_reach_share_max_pct, 2),
             "max_annual_tv_reach": round(float(lim["tv_max_reach"]), 2) if lim.get("tv_max_reach") is not None else None,
             "min_annual_tv_reach": round(float(lim["tv_min_reach"]), 2) if lim.get("tv_min_reach") is not None else None,
             "max_annual_digital_reach": round(float(lim["dg_max_reach"]), 2) if lim.get("dg_max_reach") is not None else None,
@@ -1948,10 +2744,15 @@ def _constraints_preview(payload: OptimizeAutoRequest) -> dict[str, Any]:
         total_spend += total
         weighted_tv += total * tv_split
         weighted_dg += total * dg_split
+        total_baseline_reach += total_reach
 
     if total_spend > 0:
         for r in rows:
             r["new_budget_share"] = round(r["new_total_spend"] / total_spend, 4)
+    if total_baseline_reach > 1e-12:
+        for r in rows:
+            reach_val = float(_finite(r.get("fy25_total_reach", 0.0), 0.0))
+            r["fy25_reach_share_pct"] = round((reach_val / total_baseline_reach) * 100.0, 2)
 
     return {
         "status": "ok",
@@ -1986,6 +2787,7 @@ def _constraints_preview(payload: OptimizeAutoRequest) -> dict[str, Any]:
             "solver_message": "Preview mode",
         },
         "allocation_rows": rows,
+        "market_elasticity_guidance": market_elasticity_guidance,
     }
 
 
@@ -2457,6 +3259,426 @@ def _build_yoy_growth_insights(payload: YoyGrowthRequest) -> dict[str, Any]:
         },
         "items": items,
         "waterfall": waterfall_payload,
+    }
+
+
+def _format_month_label(date_value: pd.Timestamp) -> str:
+    if pd.isna(date_value):
+        return ""
+    return date_value.strftime("%b %Y")
+
+
+def _find_existing_column(columns: list[str], candidates: list[str]) -> str:
+    if not columns:
+        return ""
+    lower_map = {str(col).strip().lower(): str(col) for col in columns}
+    for candidate in candidates:
+        key = str(candidate).strip().lower()
+        if key in lower_map:
+            return lower_map[key]
+    return ""
+
+
+def _resolve_driver_source_column(driver_variable: str, columns: list[str]) -> str:
+    raw = str(driver_variable or "").strip()
+    if not raw:
+        return ""
+    candidates: list[str] = [raw]
+    if raw.startswith("scaled_"):
+        candidates.append(raw[len("scaled_") :])
+    for suffix in ("_Adstock", "_Ad_Std", "_transformed", "_Transformed_Base"):
+        if raw.endswith(suffix):
+            candidates.append(raw[: -len(suffix)])
+    col = _find_existing_column(columns, candidates)
+    if col:
+        return col
+    lower_map = {str(col).strip().lower(): str(col) for col in columns}
+    raw_key = raw.lower()
+    for key, original in lower_map.items():
+        if key == raw_key or key.endswith(f"_{raw_key}") or raw_key.endswith(f"_{key}"):
+            return original
+    return ""
+
+
+def _aggregate_driver_feature_value(frame: pd.DataFrame, column: str) -> float | None:
+    if frame.empty or column not in frame.columns:
+        return None
+    values = pd.to_numeric(frame[column], errors="coerce").dropna()
+    if values.empty:
+        return None
+    col_key = str(column).strip().lower()
+    mean_tokens = ("price", "asp", "cpr", "ratio", "share", "pct", "percent", "rate", "index")
+    if any(token in col_key for token in mean_tokens):
+        return float(values.mean())
+    return float(values.sum())
+
+
+def _feature_value_meta(column_name: str) -> tuple[str, float]:
+    col_key = str(column_name or "").strip().lower()
+    if any(token in col_key for token in ("tv_spend", "digital_spend", "spends", "sales", "revenue", "gsv")):
+        return "INR Mn", 1_000_000.0
+    if any(token in col_key for token in ("volume", "reach", "qty")):
+        return "Mn", 1_000_000.0
+    if any(token in col_key for token in ("pct", "percent", "share", "rate")):
+        return "%", 1.0
+    if any(token in col_key for token in ("price", "asp")):
+        return "INR", 1.0
+    return "Index", 1.0
+
+
+def _classify_driver(driver_variable: str, label: str) -> tuple[str, str]:
+    key = f"{driver_variable} {label}".lower()
+    if str(driver_variable).strip().lower() == "base":
+        return "Baseline", "baseline"
+    if any(token in key for token in ("tv", "digital", "media", "reach", "spend", "price", "distribution", "promo", "discount")):
+        if "competition" in key or "competitor" in key:
+            return "Competition", "external"
+        if "price" in key:
+            return "Price", "controllable"
+        if "tv" in key:
+            return "TV Media", "controllable"
+        if "digital" in key:
+            return "Digital Media", "controllable"
+        return "Commercial Lever", "controllable"
+    if any(token in key for token in ("competition", "competitor", "season", "macro", "festival", "weather", "inflation")):
+        return "External", "external"
+    return "External", "external"
+
+
+def _pick_driver_impact(driver_rows: list[dict[str, Any]], keywords: list[str]) -> float:
+    keys = [str(k).strip().lower() for k in keywords if str(k).strip()]
+    if not keys:
+        return 0.0
+    for row in driver_rows:
+        txt = f"{row.get('variable', '')} {row.get('label', '')}".lower()
+        if any(k in txt for k in keys):
+            return float(_finite(row.get("delta_contribution_mn", 0.0), 0.0))
+    return 0.0
+
+
+def _build_driver_analysis(payload: DriverAnalysisRequest) -> dict[str, Any]:
+    cfg = _build_auto_config()
+    files = _detect_input_files()
+    model_path, weights_path = files["model_data"], files["market_weights"]
+    if model_path is None or weights_path is None:
+        raise HTTPException(status_code=400, detail="Missing required files in results folder.")
+
+    brand = payload.selected_brand.strip()
+    if brand not in cfg["markets_by_brand"]:
+        raise HTTPException(status_code=400, detail="Selected brand is not available in model results.")
+    brand_markets = cfg["markets_by_brand"][brand]
+    selected_market = payload.selected_market.strip() if payload.selected_market else ""
+    if selected_market and selected_market not in brand_markets:
+        raise HTTPException(status_code=400, detail="Selected market is not available for the brand.")
+    if not selected_market:
+        selected_market = brand_markets[0] if brand_markets else ""
+    if not selected_market:
+        raise HTTPException(status_code=400, detail="No markets available for selected brand.")
+
+    months_back = max(1, min(int(payload.months_back), 36))
+    top_n = max(3, min(int(payload.top_n), 20))
+
+    model_df = _read_model_data(model_path)
+    model_df.columns = [str(c).strip() for c in model_df.columns]
+    weights_df = _read_market_weights(weights_path)
+    weights_df.columns = [str(c).strip() for c in weights_df.columns]
+    bw = weights_df[weights_df["Brand"].astype(str).str.strip() == brand].copy()
+    if bw.empty:
+        raise HTTPException(status_code=400, detail="No rows found for selected brand in model results.")
+
+    transformed = apply_transformations_with_contributions(model_df, bw)
+    if transformed.empty:
+        raise HTTPException(status_code=400, detail="Driver analysis transformation returned no rows.")
+    transformed.columns = [str(c).strip() for c in transformed.columns]
+    if "Date" not in transformed.columns:
+        raise HTTPException(status_code=400, detail="Transformed data does not contain Date for month-level analysis.")
+
+    tdf = transformed[
+        (transformed["Brand"].astype(str).str.strip() == brand)
+        & (transformed["Region"].astype(str).str.strip() == selected_market)
+    ].copy()
+    if tdf.empty:
+        raise HTTPException(status_code=400, detail="No transformed rows found for selected market.")
+
+    y_candidates = bw["Y"].dropna().astype(str).str.strip().tolist() if "Y" in bw.columns else []
+    y_col = next((c for c in y_candidates if c in tdf.columns), "")
+    if not y_col:
+        for fallback in ("Volume", "Sales_Qty_Total", "MainMedia_predY"):
+            if fallback in tdf.columns:
+                y_col = fallback
+                break
+    if not y_col:
+        raise HTTPException(status_code=400, detail="Could not identify target volume column for driver analysis.")
+
+    contribution_cols = [c for c in tdf.columns if str(c).endswith("_contribution")]
+    numeric_cols = [y_col, "beta0", *contribution_cols]
+    for col in numeric_cols:
+        if col not in tdf.columns:
+            tdf[col] = 0.0
+        tdf[col] = pd.to_numeric(tdf[col], errors="coerce").fillna(0.0)
+
+    tdf["_date"] = pd.to_datetime(tdf["Date"], errors="coerce")
+    tdf = tdf.dropna(subset=["_date"]).copy()
+    if tdf.empty:
+        raise HTTPException(status_code=400, detail="No valid Date rows available for driver analysis.")
+
+    grouped = (
+        tdf.groupby("_date", as_index=False)[numeric_cols]
+        .sum(numeric_only=True)
+        .sort_values("_date")
+        .reset_index(drop=True)
+    )
+    if grouped.empty:
+        raise HTTPException(status_code=400, detail="Unable to build monthly grouped data for driver analysis.")
+
+    if len(grouped) < 2:
+        raise HTTPException(status_code=400, detail="At least two months are required for driver analysis.")
+
+    now_idx = len(grouped) - 1
+    then_idx = max(0, now_idx - months_back)
+    if then_idx == now_idx and now_idx > 0:
+        then_idx = now_idx - 1
+
+    then_row = grouped.iloc[then_idx]
+    now_row = grouped.iloc[now_idx]
+
+    volume_then = float(_finite(then_row.get(y_col, 0.0), 0.0))
+    volume_now = float(_finite(now_row.get(y_col, 0.0), 0.0))
+    volume_delta = volume_now - volume_then
+    volume_delta_pct = (volume_delta / volume_then * 100.0) if abs(volume_then) > 1e-12 else 0.0
+
+    predicted_then = float(_finite(then_row.get("beta0", 0.0), 0.0)) + float(
+        sum(float(_finite(then_row.get(col, 0.0), 0.0)) for col in contribution_cols)
+    )
+    predicted_now = float(_finite(now_row.get("beta0", 0.0), 0.0)) + float(
+        sum(float(_finite(now_row.get(col, 0.0), 0.0)) for col in contribution_cols)
+    )
+    predicted_delta = predicted_now - predicted_then
+    predicted_delta_pct = (predicted_delta / predicted_then * 100.0) if abs(predicted_then) > 1e-12 else 0.0
+
+    then_date_ts = pd.to_datetime(then_row["_date"], errors="coerce")
+    now_date_ts = pd.to_datetime(now_row["_date"], errors="coerce")
+
+    then_slice = tdf[tdf["_date"] == then_date_ts].copy()
+    now_slice = tdf[tdf["_date"] == now_date_ts].copy()
+
+    driver_items: list[dict[str, Any]] = []
+    base_then = float(_finite(then_row.get("beta0", 0.0), 0.0))
+    base_now = float(_finite(now_row.get("beta0", 0.0), 0.0))
+    base_delta = base_now - base_then
+    if abs(base_then) > 1e-12 or abs(base_now) > 1e-12 or abs(base_delta) > 1e-12:
+        group, cls = _classify_driver("base", "Base")
+        driver_items.append(
+            {
+                "variable": "base",
+                "label": "Base",
+                "then_contribution": round(base_then, 6),
+                "now_contribution": round(base_now, 6),
+                "delta_contribution": round(base_delta, 6),
+                "source_column": "",
+                "value_then": None,
+                "value_now": None,
+                "value_delta": None,
+                "value_change_pct": None,
+                "value_display_unit": "Index",
+                "value_scale_divisor": 1.0,
+                "driver_group": group,
+                "driver_class": cls,
+            }
+        )
+
+    for col in contribution_cols:
+        then_val = float(_finite(then_row.get(col, 0.0), 0.0))
+        now_val = float(_finite(now_row.get(col, 0.0), 0.0))
+        delta_val = now_val - then_val
+        if abs(then_val) <= 1e-12 and abs(now_val) <= 1e-12 and abs(delta_val) <= 1e-12:
+            continue
+        variable_name = str(col).replace("_contribution", "")
+        source_col = _resolve_driver_source_column(variable_name, tdf.columns.tolist())
+        value_then = _aggregate_driver_feature_value(then_slice, source_col) if source_col else None
+        value_now = _aggregate_driver_feature_value(now_slice, source_col) if source_col else None
+        value_delta = (
+            float(value_now) - float(value_then)
+            if value_then is not None and value_now is not None
+            else None
+        )
+        value_change_pct = (
+            (float(value_delta) / float(value_then) * 100.0)
+            if value_delta is not None and value_then is not None and abs(float(value_then)) > 1e-12
+            else None
+        )
+        display_unit, scale_divisor = _feature_value_meta(source_col or variable_name)
+        group, cls = _classify_driver(variable_name, _friendly_contribution_name(str(col)))
+        driver_items.append(
+            {
+                "variable": variable_name,
+                "label": _friendly_contribution_name(str(col)),
+                "then_contribution": round(then_val, 6),
+                "now_contribution": round(now_val, 6),
+                "delta_contribution": round(delta_val, 6),
+                "source_column": source_col,
+                "value_then": value_then,
+                "value_now": value_now,
+                "value_delta": value_delta,
+                "value_change_pct": value_change_pct,
+                "value_display_unit": display_unit,
+                "value_scale_divisor": scale_divisor,
+                "driver_group": group,
+                "driver_class": cls,
+            }
+        )
+
+    driver_items = sorted(driver_items, key=lambda row: abs(float(row.get("delta_contribution", 0.0))), reverse=True)
+    top_items = driver_items[:top_n]
+    residual_items = driver_items[top_n:]
+    if residual_items:
+        other_then = float(sum(float(_finite(item.get("then_contribution", 0.0), 0.0)) for item in residual_items))
+        other_now = float(sum(float(_finite(item.get("now_contribution", 0.0), 0.0)) for item in residual_items))
+        other_delta = float(sum(float(_finite(item.get("delta_contribution", 0.0), 0.0)) for item in residual_items))
+        top_items.append(
+            {
+                "variable": "other_drivers",
+                "label": "Other Drivers",
+                "then_contribution": round(other_then, 6),
+                "now_contribution": round(other_now, 6),
+                "delta_contribution": round(other_delta, 6),
+                "source_column": "",
+                "value_then": None,
+                "value_now": None,
+                "value_delta": None,
+                "value_change_pct": None,
+                "value_display_unit": "Index",
+                "value_scale_divisor": 1.0,
+                "driver_group": "External",
+                "driver_class": "external",
+            }
+        )
+
+    denominator = predicted_delta if abs(predicted_delta) > 1e-12 else volume_delta
+    for item in top_items:
+        delta_val = float(_finite(item.get("delta_contribution", 0.0), 0.0))
+        item["share_of_change_pct"] = round((delta_val / denominator * 100.0) if abs(denominator) > 1e-12 else 0.0, 2)
+        item["delta_contribution_mn"] = round(delta_val / 1_000_000.0, 4)
+        item["then_contribution_mn"] = round(float(_finite(item.get("then_contribution", 0.0), 0.0)) / 1_000_000.0, 4)
+        item["now_contribution_mn"] = round(float(_finite(item.get("now_contribution", 0.0), 0.0)) / 1_000_000.0, 4)
+        value_then = item.get("value_then")
+        value_now = item.get("value_now")
+        value_delta = item.get("value_delta")
+        scale_divisor = float(_finite(item.get("value_scale_divisor", 1.0), 1.0))
+        if abs(scale_divisor) <= 1e-12:
+            scale_divisor = 1.0
+        item["value_then_display"] = (
+            round(float(_finite(value_then, 0.0)) / scale_divisor, 4)
+            if value_then is not None
+            else None
+        )
+        item["value_now_display"] = (
+            round(float(_finite(value_now, 0.0)) / scale_divisor, 4)
+            if value_now is not None
+            else None
+        )
+        item["value_delta_display"] = (
+            round(float(_finite(value_delta, 0.0)) / scale_divisor, 4)
+            if value_delta is not None
+            else None
+        )
+
+    timeline_df = grouped.iloc[then_idx : now_idx + 1].copy()
+    timeline: list[dict[str, Any]] = []
+    for _, row in timeline_df.iterrows():
+        point_date = pd.to_datetime(row["_date"], errors="coerce")
+        point_actual = float(_finite(row.get(y_col, 0.0), 0.0))
+        point_pred = float(_finite(row.get("beta0", 0.0), 0.0)) + float(
+            sum(float(_finite(row.get(col, 0.0), 0.0)) for col in contribution_cols)
+        )
+        timeline.append(
+            {
+                "date": point_date.strftime("%Y-%m-%d") if not pd.isna(point_date) else "",
+                "date_label": _format_month_label(point_date) if not pd.isna(point_date) else "",
+                "volume_mn": round(point_actual / 1_000_000.0, 4),
+                "predicted_volume_mn": round(point_pred / 1_000_000.0, 4),
+            }
+        )
+
+    from_date = then_date_ts
+    to_date = now_date_ts
+    controllable_items = [row for row in top_items if str(row.get("driver_class", "")).lower() == "controllable"]
+    external_items = [row for row in top_items if str(row.get("driver_class", "")).lower() == "external"]
+    positive_items = [row for row in top_items if float(_finite(row.get("delta_contribution_mn", 0.0), 0.0)) > 0]
+    negative_items = [row for row in top_items if float(_finite(row.get("delta_contribution_mn", 0.0), 0.0)) < 0]
+
+    tv_spend_col = _find_existing_column(tdf.columns.tolist(), ["TV_Spends", "TV_Spend", "TV Spend"])
+    digital_spend_col = _find_existing_column(tdf.columns.tolist(), ["Digital_Spends", "Digital_Spend", "Digital Spend"])
+    price_col = _find_existing_column(tdf.columns.tolist(), ["Price", "Avg_Price", "ASP"])
+
+    def _snapshot_entry(key: str, label: str, source_col: str, keywords: list[str]) -> dict[str, Any]:
+        then_value = _aggregate_driver_feature_value(then_slice, source_col) if source_col else None
+        now_value = _aggregate_driver_feature_value(now_slice, source_col) if source_col else None
+        delta_value = (
+            float(now_value) - float(then_value)
+            if then_value is not None and now_value is not None
+            else None
+        )
+        change_pct = (
+            (float(delta_value) / float(then_value) * 100.0)
+            if delta_value is not None and then_value is not None and abs(float(then_value)) > 1e-12
+            else None
+        )
+        display_unit, divisor = _feature_value_meta(source_col or key)
+        impact_mn = _pick_driver_impact(top_items, keywords)
+        return {
+            "key": key,
+            "label": label,
+            "source_column": source_col,
+            "then_value": then_value,
+            "now_value": now_value,
+            "delta_value": delta_value,
+            "change_pct": change_pct,
+            "display_unit": display_unit,
+            "display_divisor": divisor,
+            "then_value_display": round(float(_finite(then_value, 0.0)) / divisor, 4) if then_value is not None else None,
+            "now_value_display": round(float(_finite(now_value, 0.0)) / divisor, 4) if now_value is not None else None,
+            "delta_value_display": round(float(_finite(delta_value, 0.0)) / divisor, 4) if delta_value is not None else None,
+            "impact_on_volume_change_mn": round(impact_mn, 4),
+        }
+
+    controllable_snapshot = [
+        _snapshot_entry("tv_spend", "TV Spend", tv_spend_col, ["tv_reach", "tv reach", "tv"]),
+        _snapshot_entry("digital_spend", "Digital Spend", digital_spend_col, ["digital_reach", "digital reach", "digital"]),
+        _snapshot_entry("price", "Price", price_col, ["price"]),
+    ]
+
+    return {
+        "status": "ok",
+        "message": "Driver analysis generated.",
+        "selection": {
+            "brand": brand,
+            "market": selected_market,
+            "months_back": months_back,
+            "from_date": from_date.strftime("%Y-%m-%d") if not pd.isna(from_date) else "",
+            "to_date": to_date.strftime("%Y-%m-%d") if not pd.isna(to_date) else "",
+            "from_label": _format_month_label(from_date) if not pd.isna(from_date) else "",
+            "to_label": _format_month_label(to_date) if not pd.isna(to_date) else "",
+        },
+        "summary": {
+            "volume_then_mn": round(volume_then / 1_000_000.0, 4),
+            "volume_now_mn": round(volume_now / 1_000_000.0, 4),
+            "volume_change_mn": round(volume_delta / 1_000_000.0, 4),
+            "volume_change_pct": round(volume_delta_pct, 4),
+            "predicted_then_mn": round(predicted_then / 1_000_000.0, 4),
+            "predicted_now_mn": round(predicted_now / 1_000_000.0, 4),
+            "predicted_change_mn": round(predicted_delta / 1_000_000.0, 4),
+            "predicted_change_pct": round(predicted_delta_pct, 4),
+            "driver_count": len(top_items),
+            "timeline_points": len(timeline),
+            "controllable_driver_count": len(controllable_items),
+            "external_driver_count": len(external_items),
+            "top_positive_drivers": [str(item.get("label", "")) for item in positive_items[:3]],
+            "top_negative_drivers": [str(item.get("label", "")) for item in negative_items[:3]],
+            "controllable_snapshot": controllable_snapshot,
+        },
+        "drivers": top_items,
+        "timeline": timeline,
     }
 
 
@@ -3952,6 +5174,1715 @@ def _build_ai_insights_summary(payload: InsightsAIRequest) -> dict[str, Any]:
     }
 
 
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        item = str(value or "").strip()
+        if not item:
+            continue
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
+
+
+def _combined_intent_text(prompt: str, answers: dict[str, str] | None = None) -> str:
+    base = str(prompt or "").strip()
+    if not isinstance(answers, dict) or not answers:
+        return base
+    answer_text = " ".join(str(v or "").strip() for v in answers.values() if str(v or "").strip())
+    return f"{base}\n{answer_text}".strip()
+
+
+def _contains_any(text: str, patterns: tuple[str, ...]) -> bool:
+    lower = str(text or "").lower()
+    return any(p in lower for p in patterns)
+
+
+def _metric_label(metric_key: str) -> str:
+    labels = {
+        "category_salience": "Category Salience",
+        "brand_salience": "Brand Salience",
+        "market_share": "Market Share",
+        "change_in_market_share": "Change In Market Share",
+        "change_in_brand_equity": "Change In Brand Equity",
+    }
+    raw = str(metric_key or "").strip()
+    return labels.get(raw, raw.replace("_", " ").title())
+
+
+def _condition_phrase_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "metric_key": "market_share",
+            "metric_label": "Market Share",
+            "qualifier_type": "band",
+            "requested_direction": "low",
+            "patterns": (
+                "smaller markets",
+                "small markets",
+                "smaller states",
+                "small states",
+                "lower share markets",
+                "low share markets",
+                "markets with low share",
+                "markets with lower share",
+                "minor markets",
+                "smaller presence",
+                "low presence",
+                "weak presence",
+            ),
+        },
+        {
+            "metric_key": "market_share",
+            "metric_label": "Market Share",
+            "qualifier_type": "band",
+            "requested_direction": "high",
+            "patterns": (
+                "bigger markets",
+                "large markets",
+                "larger markets",
+                "bigger states",
+                "larger states",
+                "high share markets",
+                "markets with high share",
+                "major markets",
+                "core markets",
+                "bigger presence",
+                "strong presence",
+                "high presence",
+            ),
+        },
+        {
+            "metric_key": "market_share",
+            "metric_label": "Market Share",
+            "qualifier_type": "band",
+            "requested_direction": "low",
+            "patterns": (
+                "low market share",
+                "lower market share",
+                "weak market share",
+                "small market share",
+            ),
+        },
+        {
+            "metric_key": "market_share",
+            "metric_label": "Market Share",
+            "qualifier_type": "band",
+            "requested_direction": "high",
+            "patterns": (
+                "high market share",
+                "higher market share",
+                "strong market share",
+                "big market share",
+            ),
+        },
+        {
+            "metric_key": "change_in_market_share",
+            "metric_label": "Change In Market Share",
+            "qualifier_type": "trend",
+            "requested_direction": "decreasing",
+            "patterns": (
+                "losing market share",
+                "losing share",
+                "share loss",
+                "declining share",
+                "where i am losing",
+                "where we are losing",
+                "share is declining",
+                "market share is declining",
+                "share erosion",
+                "eroding share",
+                "share has decreased",
+                "share decreased",
+                "share has declined",
+                "share declined",
+                "share has reduced",
+                "share reduced",
+                "market share has decreased",
+                "market share decreased",
+                "market share has declined",
+                "market share declined",
+                "market share has reduced",
+                "market share reduced",
+                "decreased share",
+                "declined share",
+                "reduced share",
+            ),
+        },
+        {
+            "metric_key": "change_in_market_share",
+            "metric_label": "Change In Market Share",
+            "qualifier_type": "trend",
+            "requested_direction": "increasing",
+            "patterns": (
+                "gaining market share",
+                "gaining share",
+                "share gain",
+                "growing share",
+                "where i am gaining",
+                "where we are gaining",
+                "share is growing",
+                "share is increasing",
+                "market share is growing",
+                "market share is increasing",
+                "positive share",
+                "share has increased",
+                "share increased",
+                "market share has increased",
+                "market share increased",
+            ),
+        },
+        {
+            "metric_key": "category_salience",
+            "metric_label": "Category Salience",
+            "qualifier_type": "band",
+            "requested_direction": "low",
+            "patterns": (
+                "low category salience",
+                "weak category salience",
+                "category salience is low",
+                "category salience is weak",
+            ),
+        },
+        {
+            "metric_key": "category_salience",
+            "metric_label": "Category Salience",
+            "qualifier_type": "band",
+            "requested_direction": "high",
+            "patterns": (
+                "high category salience",
+                "strong category salience",
+                "category salience is high",
+                "category salience is strong",
+            ),
+        },
+        {
+            "metric_key": "brand_salience",
+            "metric_label": "Brand Salience",
+            "qualifier_type": "band",
+            "requested_direction": "low",
+            "patterns": (
+                "low brand salience",
+                "weak brand salience",
+                "brand salience is low",
+                "brand salience is weak",
+            ),
+        },
+        {
+            "metric_key": "brand_salience",
+            "metric_label": "Brand Salience",
+            "qualifier_type": "band",
+            "requested_direction": "high",
+            "patterns": (
+                "high brand salience",
+                "strong brand salience",
+                "brand salience is high",
+                "brand salience is strong",
+            ),
+        },
+        {
+            "metric_key": "change_in_brand_equity",
+            "metric_label": "Change In Brand Equity",
+            "qualifier_type": "trend",
+            "requested_direction": "decreasing",
+            "patterns": (
+                "declining brand equity",
+                "brand equity is declining",
+                "brand equity has declined",
+                "brand equity declined",
+                "brand equity has decreased",
+                "brand equity decreased",
+                "losing brand equity",
+                "weakening brand equity",
+                "negative equity momentum",
+                "equity is falling",
+            ),
+        },
+        {
+            "metric_key": "change_in_brand_equity",
+            "metric_label": "Change In Brand Equity",
+            "qualifier_type": "trend",
+            "requested_direction": "increasing",
+            "patterns": (
+                "increasing brand equity",
+                "brand equity is increasing",
+                "brand equity has increased",
+                "brand equity increased",
+                "brand equity is growing",
+                "growing brand equity",
+                "gaining brand equity",
+                "positive equity momentum",
+                "equity is improving",
+            ),
+        },
+    ]
+
+
+def _match_markets_for_metric_condition(
+    metric_key: str,
+    requested_direction: str,
+    selected_markets: list[str],
+    market_rows: list[dict[str, Any]],
+) -> list[str]:
+    market_row_map = {str(row.get("market", "")).strip(): row for row in market_rows if str(row.get("market", "")).strip()}
+    matched: list[str] = []
+    for market in selected_markets:
+        row = market_row_map.get(market)
+        if not row:
+            continue
+        if metric_key in {"category_salience", "brand_salience", "market_share"}:
+            band_value = str(row.get(f"{metric_key}_band", "unknown")).strip().lower()
+            if requested_direction == "high" and band_value == "high":
+                matched.append(market)
+            elif requested_direction == "low" and band_value == "low":
+                matched.append(market)
+            continue
+        if metric_key in {"change_in_market_share", "change_in_brand_equity"}:
+            band_value = str(row.get(f"{metric_key}_band", "neutral")).strip().lower()
+            if requested_direction == "increasing" and band_value in {"mild_positive", "strong_positive"}:
+                matched.append(market)
+            elif requested_direction == "decreasing" and band_value in {"mild_negative", "strong_negative"}:
+                matched.append(market)
+    return matched
+
+
+def _extract_interpreted_conditions(
+    text: str,
+    selected_markets: list[str],
+    market_rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], bool]:
+    lower = str(text or "").lower()
+    conditions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    structured_condition_detected = False
+
+    def _append_condition(
+        metric_key: str,
+        metric_label: str,
+        qualifier_type: Literal["band", "trend"],
+        requested_direction: Literal["high", "low", "increasing", "decreasing"],
+        source_text: str,
+    ) -> None:
+        nonlocal structured_condition_detected
+        key = (metric_key, requested_direction)
+        if key in seen:
+            return
+        seen.add(key)
+        structured_condition_detected = True
+        conditions.append(
+            {
+                "metric_key": metric_key,
+                "metric_label": metric_label,
+                "qualifier_type": qualifier_type,
+                "requested_direction": requested_direction,
+                "source_text": source_text,
+                "matched_markets": _match_markets_for_metric_condition(
+                    metric_key,
+                    requested_direction,
+                    selected_markets,
+                    market_rows,
+                ),
+            }
+        )
+
+    for item in _condition_phrase_catalog():
+        matched_source = next((pattern for pattern in item["patterns"] if pattern in lower), "")
+        if matched_source:
+            _append_condition(
+                metric_key=item["metric_key"],
+                metric_label=item["metric_label"],
+                qualifier_type=item["qualifier_type"],
+                requested_direction=item["requested_direction"],
+                source_text=matched_source,
+            )
+
+    if "low salience" in lower or "weak salience" in lower or "underdeveloped markets" in lower:
+        _append_condition("category_salience", "Category Salience", "band", "low", "low salience")
+        _append_condition("brand_salience", "Brand Salience", "band", "low", "low salience")
+    if "high salience" in lower or "strong salience" in lower or "developed markets" in lower:
+        _append_condition("category_salience", "Category Salience", "band", "high", "high salience")
+        _append_condition("brand_salience", "Brand Salience", "band", "high", "high salience")
+
+    return conditions, structured_condition_detected
+
+
+def _intersect_condition_matches(conditions: list[dict[str, Any]], selected_markets: list[str]) -> list[str]:
+    if not conditions:
+        return []
+    matched_sets: list[set[str]] = []
+    for item in conditions:
+        markets = [str(m).strip() for m in item.get("matched_markets", []) if str(m).strip()]
+        if not markets:
+            return []
+        matched_sets.append(set(markets))
+    return [market for market in selected_markets if all(market in market_set for market_set in matched_sets)]
+
+
+def _resolve_clause_action(clause: str) -> ScenarioMarketAction | None:
+    action_lookup: list[tuple[ScenarioMarketAction, tuple[str, ...]]] = [
+        ("protect", ("protect", "defend", "preserve", "hold on to", "do not lose")),
+        ("deprioritize", ("deprioritize", "pull back", "pull out", "minimize", "avoid", "ignore")),
+        ("decrease", ("reduce", "cut", "decrease", "downweight", "scale down")),
+        ("recover", ("recover", "repair", "turn around", "improve")),
+        ("rebalance", ("rebalance", "re-balance", "shift", "redistribute", "practical mix")),
+        ("increase", ("increase", "push", "grow", "scale", "prioritize", "focus")),
+        ("hold", ("hold", "maintain", "keep steady")),
+    ]
+    for action_name, patterns in action_lookup:
+        if _contains_any(clause, patterns):
+            return action_name
+    return None
+
+
+def _build_interpretation_summary(
+    interpreted_conditions: list[dict[str, Any]],
+    explicit_market_actions: dict[str, ScenarioMarketAction],
+    global_action_preference: ScenarioMarketAction,
+) -> str:
+    if interpreted_conditions:
+        phrases = []
+        for item in interpreted_conditions:
+            direction = str(item.get("requested_direction", "")).strip().lower()
+            if direction == "high":
+                qualifier = "high"
+            elif direction == "low":
+                qualifier = "low"
+            elif direction == "increasing":
+                qualifier = "increasing"
+            else:
+                qualifier = "decreasing"
+            phrases.append(f"{item.get('metric_label', _metric_label(item.get('metric_key', '')))} is {qualifier}")
+        condition_text = " and ".join(phrases[:3])
+        if explicit_market_actions:
+            unique_actions = _dedupe_strings([str(value) for value in explicit_market_actions.values()])
+            action_text = unique_actions[0].replace("_", " ") if len(unique_actions) == 1 else "mixed actions"
+            return f"I understood: {action_text} the markets where {condition_text}."
+        return f"I understood these prompt conditions: {condition_text}."
+    if explicit_market_actions:
+        named_markets = _dedupe_strings(list(explicit_market_actions.keys()))
+        return f"I understood explicit market instructions for {', '.join(named_markets[:4])}."
+    return f"I understood a broad {str(global_action_preference).replace('_', ' ')} preference across the selected markets."
+
+
+def _call_gemini_extract_market_conditions(
+    prompt: str,
+    selected_markets: list[str],
+    market_rows: list[dict[str, Any]],
+) -> tuple[dict[str, ScenarioMarketAction], list[str]]:
+    """Use Gemini AI to extract which markets match the user's conditions."""
+    notes: list[str] = []
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    
+    if not api_key:
+        notes.append("Gemini API key missing; using rule-based condition matching.")
+        return {}, notes
+    
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    
+    # Build market data summary for AI
+    market_summary = []
+    for row in market_rows:
+        market = str(row.get("market", "")).strip()
+        if not market:
+            continue
+        market_summary.append({
+            "market": market,
+            "category_salience": row.get("category_salience"),
+            "brand_salience": row.get("brand_salience"),
+            "market_share": row.get("market_share"),
+            "change_in_market_share": row.get("change_in_market_share"),
+            "change_in_brand_equity": row.get("change_in_brand_equity"),
+        })
+    
+    ai_prompt = f"""You are analyzing a marketing budget allocation intent.
+
+USER INTENT: "{prompt}"
+
+AVAILABLE MARKETS AND DATA:
+{json.dumps(market_summary, indent=2)}
+
+TASK: Identify which markets match the user's criteria and what action they want.
+
+RULES:
+- "smaller markets" / "low share" = markets with BELOW median market_share
+- "bigger markets" / "high share" = markets with ABOVE median market_share  
+- "losing share" / "declined" / "decreased" = markets with NEGATIVE change_in_market_share
+- "gaining share" / "increased" / "grown" = markets with POSITIVE change_in_market_share
+- "low salience" = markets with BELOW median category_salience or brand_salience
+- "high salience" = markets with ABOVE median category_salience or brand_salience
+
+ACTIONS:
+- increase, decrease, protect, recover, hold, deprioritize, rebalance
+
+Return ONLY a JSON object with this structure:
+{{
+  "matched_markets": {{"market_name": "action", ...}},
+  "reasoning": "brief explanation of what you understood"
+}}
+
+If the user mentions ALL markets or no specific condition, return empty matched_markets.
+"""
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    body = {
+        "contents": [{"parts": [{"text": ai_prompt}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 800},
+    }
+    
+    for attempt in range(2):
+        try:
+            req = urlrequest.Request(url, data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"})
+            with urlrequest.urlopen(req, timeout=15) as response:
+                parsed = json.loads(response.read().decode("utf-8"))
+            
+            candidates = parsed.get("candidates", [])
+            if not candidates:
+                notes.append("Gemini returned empty response; using rule-based matching.")
+                return {}, notes
+            
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text = str(parts[0].get("text", "")).strip() if parts else ""
+            
+            if not text:
+                notes.append("Gemini returned empty text; using rule-based matching.")
+                return {}, notes
+            
+            # Extract JSON from response
+            result = _extract_json_object(text)
+            if result and isinstance(result.get("matched_markets"), dict):
+                matched = result["matched_markets"]
+                reasoning = result.get("reasoning", "")
+                if reasoning:
+                    notes.append(f"AI understood: {reasoning}")
+                return matched, notes
+            
+            notes.append("Gemini returned invalid format; using rule-based matching.")
+            return {}, notes
+            
+        except urlerror.HTTPError as exc:
+            if attempt < 1:
+                time.sleep(0.5)
+                continue
+            notes.append(f"Gemini API error ({exc.code}); using rule-based matching.")
+            return {}, notes
+        except Exception:
+            if attempt < 1:
+                time.sleep(0.5)
+            else:
+                notes.append("Gemini request failed; using rule-based matching.")
+    
+    return {}, notes
+
+
+def _call_gemini_intent_debug(
+    prompt: str,
+    selected_markets: list[str],
+    market_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    notes: list[str] = []
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+
+    market_summary = []
+    for row in market_rows:
+        market = str(row.get("market", "")).strip()
+        if not market:
+            continue
+        market_summary.append(
+            {
+                "market": market,
+                "category_salience": row.get("category_salience"),
+                "brand_salience": row.get("brand_salience"),
+                "market_share": row.get("market_share"),
+                "change_in_market_share": row.get("change_in_market_share"),
+                "change_in_brand_equity": row.get("change_in_brand_equity"),
+            }
+        )
+
+    ai_prompt = f"""You are analyzing a marketing budget allocation intent.
+
+USER INTENT: "{prompt}"
+
+SELECTED MARKETS:
+{json.dumps(selected_markets, indent=2)}
+
+AVAILABLE MARKETS AND DATA:
+{json.dumps(market_summary, indent=2)}
+
+TASK:
+Interpret the user prompt as clearly as possible.
+
+Return ONLY a JSON object with this structure:
+{{
+  "goal": "",
+  "task_types": [],
+  "metrics_referenced": [],
+  "conditions": [],
+  "entity": "market",
+  "action_direction": "",
+  "matched_markets": [],
+  "assumptions": [],
+  "reasoning": ""
+}}
+"""
+
+    result: dict[str, Any] = {
+        "provider": "gemini",
+        "model": model,
+        "ai_prompt": ai_prompt,
+        "raw_text": "",
+        "parsed_json": None,
+        "notes": notes,
+    }
+
+    if not api_key:
+        notes.append("Gemini API key missing; debug call was not sent.")
+        return result
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    body = {
+        "contents": [{"parts": [{"text": ai_prompt}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1200},
+    }
+
+    for attempt in range(2):
+        try:
+            req = urlrequest.Request(url, data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"})
+            with urlrequest.urlopen(req, timeout=20) as response:
+                parsed = json.loads(response.read().decode("utf-8"))
+            candidates = parsed.get("candidates", [])
+            if not candidates:
+                notes.append("Gemini returned empty response.")
+                return result
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text = str(parts[0].get("text", "")).strip() if parts else ""
+            result["raw_text"] = text
+            parsed_obj = _extract_json_object(text)
+            if parsed_obj is not None:
+                result["parsed_json"] = parsed_obj
+            else:
+                notes.append("Gemini returned text that could not be parsed as JSON.")
+            return result
+        except urlerror.HTTPError as exc:
+            if attempt < 1:
+                time.sleep(0.5)
+                continue
+            notes.append(f"Gemini API error ({exc.code}).")
+            return result
+        except Exception as exc:  # noqa: BLE001
+            if attempt < 1:
+                time.sleep(0.5)
+                continue
+            notes.append(f"Gemini request failed: {exc}")
+            return result
+    return result
+
+
+def _filter_markets_by_condition(
+    clause: str,
+    selected_markets: list[str],
+    market_rows: list[dict[str, Any]],
+) -> list[str]:
+    """Filter markets based on conditional phrases like 'where I am losing market share'."""
+    clause_lower = clause.lower()
+    market_row_map = {str(row.get("market", "")).strip(): row for row in market_rows if str(row.get("market", "")).strip()}
+    
+    # Detect conditional patterns
+    losing_share_patterns = (
+        "losing market share", "losing share", "share loss", "declining share",
+        "where i am losing", "where we are losing", "share is declining",
+        "market share is declining", "share erosion", "eroding share",
+        "share has decreased", "share decreased", "share has declined", "share declined",
+        "market share has decreased", "market share decreased", "market share has declined",
+        "market share declined", "decreased share", "declined share"
+    )
+    gaining_share_patterns = (
+        "gaining market share", "gaining share", "share gain", "growing share",
+        "where i am gaining", "where we are gaining", "share is growing",
+        "market share is growing", "share momentum", "positive share"
+    )
+    high_cpr_patterns = (
+        "high cpr", "poor cpr", "weak cpr", "expensive cpr", "inefficient",
+        "high cost per reach", "where cpr is high", "where cost is high"
+    )
+    low_elasticity_patterns = (
+        "low elasticity", "weak elasticity", "poor responsiveness",
+        "low responsiveness", "where elasticity is low", "unresponsive"
+    )
+    high_elasticity_patterns = (
+        "high elasticity", "strong elasticity", "good responsiveness",
+        "high responsiveness", "where elasticity is high", "responsive"
+    )
+    smaller_market_patterns = (
+        "smaller markets", "small markets", "lower share markets", "low share markets",
+        "markets with low share", "markets with lower share", "minor markets",
+        "smaller presence", "low presence", "weak presence"
+    )
+    bigger_market_patterns = (
+        "bigger markets", "large markets", "larger markets", "high share markets",
+        "markets with high share", "major markets", "core markets",
+        "bigger presence", "strong presence", "high presence"
+    )
+    low_salience_patterns = (
+        "low salience", "weak salience", "low category salience", "low brand salience",
+        "weak category", "weak brand", "underdeveloped markets"
+    )
+    high_salience_patterns = (
+        "high salience", "strong salience", "high category salience", "high brand salience",
+        "strong category", "strong brand", "developed markets"
+    )
+    
+    filtered_markets: list[str] = []
+    
+    # Check for losing market share condition
+    if _contains_any(clause_lower, losing_share_patterns):
+        for market in selected_markets:
+            row = market_row_map.get(market)
+            if row:
+                share_change_band = str(row.get("change_in_market_share_band", "neutral"))
+                if share_change_band in {"mild_negative", "strong_negative"}:
+                    filtered_markets.append(market)
+        return filtered_markets
+    
+    # Check for gaining market share condition
+    if _contains_any(clause_lower, gaining_share_patterns):
+        for market in selected_markets:
+            row = market_row_map.get(market)
+            if row:
+                share_change_band = str(row.get("change_in_market_share_band", "neutral"))
+                if share_change_band in {"mild_positive", "strong_positive"}:
+                    filtered_markets.append(market)
+        return filtered_markets
+    
+    # Check for smaller markets condition (lower 50% by market share)
+    if _contains_any(clause_lower, smaller_market_patterns):
+        # Get all market shares and calculate median
+        market_shares = []
+        for market in selected_markets:
+            row = market_row_map.get(market)
+            if row:
+                share = row.get("market_share")
+                if share is not None and np.isfinite(share):
+                    market_shares.append((market, float(share)))
+        
+        if market_shares:
+            # Sort by market share
+            market_shares.sort(key=lambda x: x[1])
+            # Take lower 50% (smaller markets)
+            median_idx = len(market_shares) // 2
+            filtered_markets = [m for m, _ in market_shares[:median_idx]]
+        return filtered_markets
+    
+    # Check for bigger markets condition (upper 50% by market share)
+    if _contains_any(clause_lower, bigger_market_patterns):
+        # Get all market shares and calculate median
+        market_shares = []
+        for market in selected_markets:
+            row = market_row_map.get(market)
+            if row:
+                share = row.get("market_share")
+                if share is not None and np.isfinite(share):
+                    market_shares.append((market, float(share)))
+        
+        if market_shares:
+            # Sort by market share
+            market_shares.sort(key=lambda x: x[1])
+            # Take upper 50% (bigger markets)
+            median_idx = len(market_shares) // 2
+            filtered_markets = [m for m, _ in market_shares[median_idx:]]
+        return filtered_markets
+    
+    # Check for low salience condition (lower 50% by category or brand salience)
+    if _contains_any(clause_lower, low_salience_patterns):
+        # Calculate based on category salience or brand salience
+        salience_values = []
+        for market in selected_markets:
+            row = market_row_map.get(market)
+            if row:
+                cat_sal = row.get("category_salience")
+                brand_sal = row.get("brand_salience")
+                # Use average of both if available
+                if cat_sal is not None and brand_sal is not None:
+                    avg_sal = (float(cat_sal) + float(brand_sal)) / 2
+                    salience_values.append((market, avg_sal))
+                elif cat_sal is not None:
+                    salience_values.append((market, float(cat_sal)))
+                elif brand_sal is not None:
+                    salience_values.append((market, float(brand_sal)))
+        
+        if salience_values:
+            salience_values.sort(key=lambda x: x[1])
+            median_idx = len(salience_values) // 2
+            filtered_markets = [m for m, _ in salience_values[:median_idx]]
+        return filtered_markets
+    
+    # Check for high salience condition (upper 50% by category or brand salience)
+    if _contains_any(clause_lower, high_salience_patterns):
+        # Calculate based on category salience or brand salience
+        salience_values = []
+        for market in selected_markets:
+            row = market_row_map.get(market)
+            if row:
+                cat_sal = row.get("category_salience")
+                brand_sal = row.get("brand_salience")
+                # Use average of both if available
+                if cat_sal is not None and brand_sal is not None:
+                    avg_sal = (float(cat_sal) + float(brand_sal)) / 2
+                    salience_values.append((market, avg_sal))
+                elif cat_sal is not None:
+                    salience_values.append((market, float(cat_sal)))
+                elif brand_sal is not None:
+                    salience_values.append((market, float(brand_sal)))
+        
+        if salience_values:
+            salience_values.sort(key=lambda x: x[1])
+            median_idx = len(salience_values) // 2
+            filtered_markets = [m for m, _ in salience_values[median_idx:]]
+        return filtered_markets
+    
+    # Check for high CPR condition
+    if _contains_any(clause_lower, high_cpr_patterns):
+        for market in selected_markets:
+            row = market_row_map.get(market)
+            if row:
+                cpr_band = str(row.get("avg_cpr_band", "unknown"))
+                if cpr_band == "high_cost":
+                    filtered_markets.append(market)
+        return filtered_markets
+    
+    # Check for low elasticity condition
+    if _contains_any(clause_lower, low_elasticity_patterns):
+        for market in selected_markets:
+            row = market_row_map.get(market)
+            if row:
+                responsiveness = str(row.get("responsiveness_label", "Unknown")).lower()
+                if responsiveness in {"low", "weak", "poor"}:
+                    filtered_markets.append(market)
+        return filtered_markets
+    
+    # Check for high elasticity condition
+    if _contains_any(clause_lower, high_elasticity_patterns):
+        for market in selected_markets:
+            row = market_row_map.get(market)
+            if row:
+                responsiveness = str(row.get("responsiveness_label", "Unknown")).lower()
+                if responsiveness in {"high", "strong", "good"}:
+                    filtered_markets.append(market)
+        return filtered_markets
+    
+    return []
+
+
+def _extract_prompt_market_actions(
+    prompt: str,
+    selected_markets: list[str],
+    market_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    actions: dict[str, ScenarioMarketAction] = {}
+    notes: list[str] = []
+    clauses = [c.strip() for c in re.split(r"[.;\n]+", str(prompt or "")) if c.strip()]
+    market_key_map = {_normalize_name_key(m): str(m).strip() for m in selected_markets if str(m).strip()}
+    interpreted_conditions: list[dict[str, Any]] = []
+    condition_seen: set[tuple[str, str]] = set()
+    structured_condition_detected = False
+    zero_match_condition_detected = False
+
+    def _record_conditions(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            key = (
+                str(item.get("metric_key", "")).strip(),
+                str(item.get("requested_direction", "")).strip(),
+            )
+            if not key[0] or key in condition_seen:
+                continue
+            condition_seen.add(key)
+            interpreted_conditions.append(item)
+
+    for clause in clauses:
+        clause_key = _normalize_name_key(clause)
+        clause_action = _resolve_clause_action(clause)
+        clause_conditions, clause_has_structured_condition = _extract_interpreted_conditions(
+            clause,
+            selected_markets,
+            market_rows or [],
+        )
+        if clause_has_structured_condition:
+            structured_condition_detected = True
+        _record_conditions(clause_conditions)
+
+        matched_markets = [market_name for market_key, market_name in market_key_map.items() if market_key and market_key in clause_key]
+        if not matched_markets and clause_conditions:
+            matched_markets = _intersect_condition_matches(clause_conditions, selected_markets)
+            if matched_markets:
+                notes.append(
+                    f"Structured prompt parsing matched {len(matched_markets)} markets for clause based on market-intelligence columns."
+                )
+            else:
+                zero_match_condition_detected = True
+                notes.append("A prompt condition was understood, but no selected markets matched it exactly.")
+
+        if matched_markets and clause_action is not None:
+            for market_name in matched_markets:
+                actions[market_name] = clause_action
+
+    if not actions and market_rows and str(prompt or "").strip() and not structured_condition_detected:
+        ai_actions, ai_notes = _call_gemini_extract_market_conditions(prompt, selected_markets, market_rows)
+        notes.extend(ai_notes)
+        for market_name, action in ai_actions.items():
+            canonical_market = market_key_map.get(_normalize_name_key(market_name), str(market_name).strip())
+            if canonical_market in selected_markets and action in {
+                "increase",
+                "decrease",
+                "protect",
+                "hold",
+                "deprioritize",
+                "rebalance",
+                "recover",
+            }:
+                actions[canonical_market] = action
+
+    global_action = _resolve_global_action_preference(prompt, _resolve_objective_preference(prompt))
+    interpretation_summary = _build_interpretation_summary(interpreted_conditions, actions, global_action)
+    return {
+        "actions": actions,
+        "notes": notes,
+        "interpreted_conditions": interpreted_conditions,
+        "interpretation_summary": interpretation_summary,
+        "structured_condition_detected": structured_condition_detected,
+        "zero_match_condition_detected": zero_match_condition_detected,
+    }
+
+
+def _resolve_objective_preference(text: str) -> ScenarioObjectivePreference:
+    lower = str(text or "").lower()
+    if _contains_any(lower, ("efficiency", "efficient", "cpr", "practical roi", "cost-effective")):
+        return "efficiency"
+    if _contains_any(lower, ("revenue", "value growth", "premium", "profit")):
+        return "revenue"
+    if _contains_any(lower, ("volume", "penetration", "reach growth", "scale distribution")):
+        return "volume"
+    if _contains_any(lower, ("practical", "realistic", "pragmatic", "steady", "balanced but practical")):
+        return "practical_mix"
+    return "balanced"
+
+
+def _resolve_anchor_metrics(text: str, objective: ScenarioObjectivePreference) -> tuple[list[str], list[str]]:
+    lower = str(text or "").lower()
+    metric_patterns = [
+        ("category_salience", ("category salience", "salience", "opportunity")),
+        ("brand_salience", ("brand salience", "brand presence", "brand pull", "activation")),
+        (
+            "change_in_market_share",
+            (
+                "change in market share",
+                "share gain",
+                "share growth",
+                "share momentum",
+                "gaining share",
+                "losing market share",
+                "lose market share",
+                "losing share",
+                "share loss",
+                "market share loss",
+                "declining share",
+                "falling share",
+                "share erosion",
+                "eroding share",
+            ),
+        ),
+        ("market_share", ("market share", "share", "franchise", "core market", "core markets")),
+        ("change_in_brand_equity", ("change in brand equity", "brand equity", "equity momentum", "brand momentum")),
+    ]
+    matched = [metric_name for metric_name, patterns in metric_patterns if _contains_any(lower, patterns)]
+    if len(matched) >= 2:
+        return _dedupe_strings(matched[:2]), _dedupe_strings(matched[2:4])
+    if len(matched) == 1:
+        defaults = {
+            "volume": ["category_salience", "change_in_market_share"],
+            "revenue": ["market_share", "brand_salience"],
+            "balanced": ["category_salience", "market_share"],
+            "efficiency": ["brand_salience", "change_in_brand_equity"],
+            "practical_mix": ["market_share", "category_salience"],
+        }
+        secondary = [m for m in defaults.get(objective, []) if m != matched[0]]
+        return [matched[0]], secondary[:1]
+    defaults = {
+        "volume": (["category_salience"], ["change_in_market_share"]),
+        "revenue": (["market_share"], ["brand_salience"]),
+        "balanced": (["category_salience"], ["market_share"]),
+        "efficiency": (["brand_salience"], ["change_in_brand_equity"]),
+        "practical_mix": (["market_share"], ["category_salience"]),
+    }
+    return defaults.get(objective, (["category_salience"], ["market_share"]))
+
+
+def _resolve_global_action_preference(text: str, objective: ScenarioObjectivePreference) -> ScenarioMarketAction:
+    lower = str(text or "").lower()
+    if _contains_any(lower, ("rebalance", "re-balance", "redistribute", "reallocate", "practical mix")):
+        return "rebalance"
+    if _contains_any(lower, ("protect", "defend", "preserve")):
+        return "protect"
+    if _contains_any(lower, ("recover", "repair", "turn around")):
+        return "recover"
+    if _contains_any(lower, ("deprioritize", "avoid", "pull back", "minimize")):
+        return "deprioritize"
+    if _contains_any(lower, ("reduce", "cut", "decrease")):
+        return "decrease"
+    if _contains_any(lower, ("hold", "maintain", "keep steady")):
+        return "hold"
+    if _contains_any(lower, ("increase", "push", "grow", "scale", "prioritize")):
+        return "increase"
+    if objective in {"balanced", "practical_mix"}:
+        return "rebalance"
+    return "increase"
+
+
+def _resolve_practicality_level(text: str) -> Literal["high", "medium", "low"]:
+    lower = str(text or "").lower()
+    if _contains_any(lower, ("practical", "realistic", "conservative", "careful", "protect")):
+        return "high"
+    if _contains_any(lower, ("aggressive", "stretch", "maximize", "hard push")):
+        return "low"
+    return "medium"
+
+
+def _resolve_aggressiveness_level(text: str, objective: ScenarioObjectivePreference) -> Literal["low", "medium", "high"]:
+    lower = str(text or "").lower()
+    if _contains_any(lower, ("aggressive", "hard push", "maximize", "go big")):
+        return "high"
+    if _contains_any(lower, ("protect", "practical", "careful", "conservative", "efficient")):
+        return "low"
+    if objective in {"volume", "revenue"}:
+        return "medium"
+    return "medium"
+
+
+def _default_market_action_from_intelligence(row: dict[str, Any]) -> ScenarioMarketAction:
+    cat_band = str(row.get("category_salience_band", "unknown"))
+    brand_band = str(row.get("brand_salience_band", "unknown"))
+    share_band = str(row.get("market_share_band", "unknown"))
+    share_change_band = str(row.get("change_in_market_share_band", "neutral"))
+    equity_change_band = str(row.get("change_in_brand_equity_band", "neutral"))
+    high_salience = cat_band == "high" or brand_band == "high"
+    low_salience = cat_band == "low" and brand_band == "low"
+    high_share = share_band == "high"
+    weak_momentum = share_change_band in {"mild_negative", "strong_negative"} or equity_change_band in {"mild_negative", "strong_negative"}
+    strong_negative = share_change_band == "strong_negative" or equity_change_band == "strong_negative"
+    positive_momentum = share_change_band in {"mild_positive", "strong_positive"} or equity_change_band in {"mild_positive", "strong_positive"}
+    if high_share and weak_momentum:
+        return "recover"
+    if low_salience and strong_negative:
+        return "deprioritize"
+    if high_salience and weak_momentum:
+        return "recover"
+    if high_salience and positive_momentum:
+        return "increase"
+    if high_salience or high_share:
+        return "protect"
+    if weak_momentum:
+        return "deprioritize" if low_salience else "recover"
+    return "hold"
+
+
+def _normalize_metric_token(metric_name: str) -> str:
+    mapping = {
+        "category salience": "category_salience",
+        "brand salience": "brand_salience",
+        "market share": "market_share",
+        "change in market share": "change_in_market_share",
+        "change in brand equity": "change_in_brand_equity",
+        "use a mix": "metric_mix",
+        "mix": "metric_mix",
+    }
+    raw = str(metric_name or "").strip().lower()
+    return mapping.get(raw, raw.replace(" ", "_"))
+
+
+def _resolve_task_types(
+    prompt: str,
+    interpreted_conditions: list[dict[str, Any]],
+    explicit_market_actions: dict[str, ScenarioMarketAction],
+    objective: ScenarioObjectivePreference,
+) -> list[str]:
+    lower = str(prompt or "").lower()
+    task_types: list[str] = []
+    if interpreted_conditions or explicit_market_actions:
+        task_types.append("filter")
+    if explicit_market_actions:
+        task_types.append("recommend")
+    if _contains_any(lower, ("prioritize", "rank", "top", "best", "where should", "which markets")):
+        task_types.append("rank")
+    if _contains_any(lower, ("compare", "versus", "vs", "against")):
+        task_types.append("compare")
+    if _contains_any(lower, ("identify", "diagnose", "why", "underperform", "declining performance")):
+        task_types.append("diagnose")
+    if _contains_any(lower, ("segment", "cluster", "group")):
+        task_types.append("segment")
+    if not task_types:
+        task_types.extend(["recommend", "summarize"] if objective in {"volume", "revenue", "balanced", "efficiency", "practical_mix"} else ["summarize"])
+    return _dedupe_strings(task_types)
+
+
+def _build_metric_mappings(
+    interpreted_conditions: list[dict[str, Any]],
+    primary_anchor_metrics: list[str],
+    secondary_anchor_metrics: list[str],
+) -> list[dict[str, Any]]:
+    mappings: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def _append_mapping(
+        metric_key: str,
+        prompt_term: str,
+        match_type: str,
+        interpretation: str,
+        confidence: float,
+        qualifier_type: str = "",
+    ) -> None:
+        normalized_key = str(metric_key or "").strip()
+        if not normalized_key or normalized_key in seen:
+            return
+        seen.add(normalized_key)
+        source_column = normalized_key
+        if qualifier_type == "band":
+            source_column = f"{normalized_key}_band"
+        elif qualifier_type == "trend":
+            source_column = f"{normalized_key}_band"
+        mappings.append(
+            ScenarioMetricMapping(
+                prompt_term=prompt_term or _metric_label(normalized_key),
+                metric_key=normalized_key,
+                metric_label=_metric_label(normalized_key),
+                source_column=source_column,
+                match_type=match_type,
+                interpretation=interpretation,
+                confidence=round(float(confidence), 4),
+            ).model_dump(mode="json")
+        )
+
+    for item in interpreted_conditions:
+        metric_key = str(item.get("metric_key", "")).strip()
+        requested_direction = str(item.get("requested_direction", "")).strip()
+        qualifier_type = str(item.get("qualifier_type", "")).strip()
+        interpretation = f"Treat {metric_key} as {requested_direction}"
+        _append_mapping(
+            metric_key=metric_key,
+            prompt_term=str(item.get("source_text", "")).strip() or _metric_label(metric_key),
+            match_type="phrase_catalog",
+            interpretation=interpretation,
+            confidence=0.88,
+            qualifier_type=qualifier_type,
+        )
+
+    for metric_key in [*primary_anchor_metrics, *secondary_anchor_metrics]:
+        _append_mapping(
+            metric_key=metric_key,
+            prompt_term=_metric_label(metric_key),
+            match_type="anchor_metric",
+            interpretation="Used as an anchor metric for the analytical plan.",
+            confidence=0.72,
+        )
+    return mappings
+
+
+def _build_qualification_logic(
+    interpreted_conditions: list[dict[str, Any]],
+    explicit_market_actions: dict[str, ScenarioMarketAction],
+) -> list[dict[str, Any]]:
+    rules: list[dict[str, Any]] = []
+    for item in interpreted_conditions:
+        metric_key = str(item.get("metric_key", "")).strip()
+        requested_direction = str(item.get("requested_direction", "")).strip()
+        qualifier_type = str(item.get("qualifier_type", "")).strip()
+        rules.append(
+            ScenarioLogicRule(
+                kind="qualification",
+                label=f"{_metric_label(metric_key)} must be {requested_direction}",
+                metric_key=metric_key,
+                operator="band_equals" if qualifier_type == "band" else "trend_equals",
+                value=requested_direction,
+                markets=list(item.get("matched_markets", []) or []),
+                rationale=f"Derived from prompt phrase '{str(item.get('source_text', '')).strip() or _metric_label(metric_key)}'.",
+            ).model_dump(mode="json")
+        )
+    if explicit_market_actions:
+        rules.append(
+            ScenarioLogicRule(
+                kind="qualification",
+                label="Explicit market scope from prompt",
+                metric_key="market",
+                operator="in",
+                value="explicit_markets",
+                markets=_dedupe_strings(list(explicit_market_actions.keys())),
+                rationale="Named or condition-matched markets qualify for action assignment.",
+            ).model_dump(mode="json")
+        )
+    return rules
+
+
+def _build_prioritization_logic(
+    objective: ScenarioObjectivePreference,
+    global_action_preference: ScenarioMarketAction,
+    action_preferences_by_market: dict[str, ScenarioMarketAction],
+) -> list[dict[str, Any]]:
+    action_markets: dict[str, list[str]] = {}
+    for market, action in action_preferences_by_market.items():
+        action_markets.setdefault(str(action), []).append(str(market))
+    rules: list[dict[str, Any]] = [
+        ScenarioLogicRule(
+            kind="prioritization",
+            label="Primary objective preference",
+            metric_key="objective_preference",
+            operator="equals",
+            value=str(objective),
+            rationale="Used to translate the interpreted business goal into execution weighting.",
+        ).model_dump(mode="json"),
+        ScenarioLogicRule(
+            kind="prioritization",
+            label="Default market action",
+            metric_key="global_action_preference",
+            operator="equals",
+            value=str(global_action_preference),
+            rationale="Acts as the default direction when no stronger market-specific instruction is available.",
+        ).model_dump(mode="json"),
+    ]
+    for action, markets in sorted(action_markets.items()):
+        rules.append(
+            ScenarioLogicRule(
+                kind="prioritization",
+                label=f"{action.replace('_', ' ').title()} markets",
+                metric_key="action_preferences_by_market",
+                operator="assign_action",
+                value=action,
+                markets=_dedupe_strings(markets),
+                rationale="Deterministic market action bucket generated from interpreted rules and market intelligence.",
+            ).model_dump(mode="json")
+        )
+    return rules
+
+
+def _build_analysis_plan(
+    prompt: str,
+    brand: str,
+    selected_markets: list[str],
+    interpreted_conditions: list[dict[str, Any]],
+    primary_anchor_metrics: list[str],
+    secondary_anchor_metrics: list[str],
+    explicit_market_actions: dict[str, ScenarioMarketAction],
+    action_preferences_by_market: dict[str, ScenarioMarketAction],
+    objective: ScenarioObjectivePreference,
+    global_action_preference: ScenarioMarketAction,
+    negative_filters: list[str],
+    confidence_score: float,
+    readiness_for_generation: bool,
+    confirmation_required: bool,
+    explanation_notes: list[str],
+) -> dict[str, Any]:
+    task_types = _resolve_task_types(prompt, interpreted_conditions, explicit_market_actions, objective)
+    metric_mappings = _build_metric_mappings(interpreted_conditions, primary_anchor_metrics, secondary_anchor_metrics)
+    qualification_logic = _build_qualification_logic(interpreted_conditions, explicit_market_actions)
+    prioritization_logic = _build_prioritization_logic(objective, global_action_preference, action_preferences_by_market)
+    derived_metrics: list[str] = []
+    for item in interpreted_conditions:
+        metric_key = str(item.get("metric_key", "")).strip()
+        if metric_key and metric_key not in derived_metrics:
+            derived_metrics.append(metric_key)
+    derived_metrics.extend([item for item in negative_filters if item not in derived_metrics])
+
+    assumptions = _dedupe_strings(
+        [
+            "Prompt interpretation is converted into a plan first and executed deterministically downstream.",
+            "Ambiguous business terms are resolved against available market-intelligence columns and metric bands.",
+            "Qualification logic determines which markets match; prioritization logic determines which matching markets matter most.",
+            *[
+                note
+                for note in explanation_notes
+                if "understood" not in str(note).lower() and "matched" not in str(note).lower()
+            ],
+        ]
+    )
+    review_reason: list[str] = []
+    if confirmation_required:
+        review_reason.append("Confidence is below the auto-run threshold, so explicit review is required.")
+    if not readiness_for_generation:
+        review_reason.append("The system still needs clarification before deterministic execution.")
+    if interpreted_conditions and any(len(item.get("matched_markets", []) or []) == 0 for item in interpreted_conditions):
+        review_reason.append("At least one interpreted condition did not match any selected markets.")
+    if not metric_mappings:
+        review_reason.append("The prompt did not map cleanly to known business metrics.")
+
+    output_fields = [
+        "market",
+        "action",
+        "market_action_explanation",
+        "matched_rules",
+        "rank",
+    ]
+    if primary_anchor_metrics:
+        output_fields.extend(primary_anchor_metrics[:2])
+    output_fields = _dedupe_strings(output_fields)
+
+    goal = str(prompt or "").strip() or "Interpret the business prompt and produce market-level recommendations."
+    plan = ScenarioAnalysisPlan(
+        task_types=task_types,
+        goal=goal,
+        entity=ScenarioPlanEntity(grain="market", scope=_dedupe_strings(selected_markets), brand=str(brand or "")),
+        metric_mappings=metric_mappings,
+        qualification_logic=qualification_logic,
+        prioritization_logic=prioritization_logic,
+        derived_metrics=_dedupe_strings(derived_metrics),
+        grouping=[],
+        segmentation=["action_preferences_by_market"] if action_preferences_by_market else [],
+        output=ScenarioOutputSpec(output_type="ranked_market_recommendations", fields=output_fields),
+        assumptions=assumptions,
+        confidence=round(float(confidence_score), 4),
+        needs_review=bool(confirmation_required or not readiness_for_generation),
+        review_reason=_dedupe_strings(review_reason),
+    )
+    return plan.model_dump(mode="json")
+
+
+def _build_clarification_questions(
+    prompt: str,
+    clarification_round: int,
+    answers: dict[str, str],
+    objective: ScenarioObjectivePreference,
+    primary_anchor_metrics: list[str],
+    explicit_market_actions: dict[str, ScenarioMarketAction],
+    selected_markets: list[str],
+    market_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    questions: list[dict[str, Any]] = []
+    if not str(prompt or "").strip():
+        questions.append(
+            {
+                "id": "q_business_objective",
+                "question": "What should this scenario run optimize first?",
+                "options": ["Grow volume", "Grow revenue", "Balanced growth", "Maximize efficiency", "Keep it practical"],
+                "allow_free_text": False,
+            }
+        )
+    if not primary_anchor_metrics:
+        questions.append(
+            {
+                "id": "q_anchor_metric",
+                "question": "Which market signal should guide the allocation most?",
+                "options": ["Category salience", "Brand salience", "Market share", "Change in market share", "Change in brand equity", "Use a mix"],
+                "allow_free_text": False,
+            }
+        )
+    if not explicit_market_actions:
+        questions.append(
+            {
+                "id": "q_market_direction",
+                "question": "How should the generator treat the priority markets by default?",
+                "options": ["Increase in priority markets", "Protect core markets", "Rebalance within current markets", "Reduce weaker markets"],
+                "allow_free_text": False,
+            }
+        )
+    if clarification_round < 1 and not answers.get("q_protect_core_markets", "").strip():
+        high_share_markets = [str(row.get("market", "")) for row in market_rows if str(row.get("market_share_band", "")) == "high"]
+        if high_share_markets:
+            questions.append(
+                {
+                    "id": "q_protect_core_markets",
+                    "question": "Should the strongest share markets be protected while we search for growth elsewhere?",
+                    "options": ["Yes protect core markets", "Only protect the strongest markets", "No let every market move"],
+                    "allow_free_text": False,
+                }
+            )
+    if clarification_round < 2 and not answers.get("q_tradeoff_preference", "").strip():
+        questions.append(
+            {
+                "id": "q_tradeoff_preference",
+                "question": "When opportunity and efficiency disagree, what should win by default?",
+                "options": ["Opportunity first, but practical", "Efficiency first", "Defend core share first", "Momentum first"],
+                "allow_free_text": False,
+            }
+        )
+    return questions[:3]
+
+
+def _generate_market_action_explanation(
+    market: str,
+    action: ScenarioMarketAction,
+    row: dict[str, Any],
+    was_explicit: bool,
+    prompt: str,
+) -> str:
+    """Generate a human-readable explanation for why a market got a specific action."""
+    if was_explicit:
+        # Check what condition matched
+        prompt_lower = prompt.lower()
+        share_change_band = str(row.get("change_in_market_share_band", "neutral"))
+        cpr_band = str(row.get("avg_cpr_band", "unknown"))
+        responsiveness = str(row.get("responsiveness_label", "Unknown"))
+        market_share = row.get("market_share")
+        cat_salience = row.get("category_salience")
+        brand_salience = row.get("brand_salience")
+        
+        reasons = []
+        
+        # Check for losing share condition
+        if any(phrase in prompt_lower for phrase in ["losing", "share loss", "declining share"]):
+            if share_change_band in {"mild_negative", "strong_negative"}:
+                change_val = row.get("change_in_market_share", 0)
+                reasons.append(f"losing market share ({change_val:+.1f}%)")
+        
+        # Check for gaining share condition
+        if any(phrase in prompt_lower for phrase in ["gaining", "share gain", "growing share"]):
+            if share_change_band in {"mild_positive", "strong_positive"}:
+                change_val = row.get("change_in_market_share", 0)
+                reasons.append(f"gaining market share ({change_val:+.1f}%)")
+        
+        # Check for smaller markets condition
+        if any(phrase in prompt_lower for phrase in ["smaller market", "small market", "lower share", "low share", "smaller presence", "low presence"]):
+            if market_share is not None:
+                reasons.append(f"smaller market with {market_share:.1f}% share")
+        
+        # Check for bigger markets condition
+        if any(phrase in prompt_lower for phrase in ["bigger market", "large market", "larger market", "high share", "bigger presence", "strong presence"]):
+            if market_share is not None:
+                reasons.append(f"bigger market with {market_share:.1f}% share")
+        
+        # Check for low salience condition
+        if any(phrase in prompt_lower for phrase in ["low salience", "weak salience", "underdeveloped"]):
+            if cat_salience is not None or brand_salience is not None:
+                reasons.append(f"low salience (cat: {cat_salience:.1f}%, brand: {brand_salience:.1f}%)")
+        
+        # Check for high salience condition
+        if any(phrase in prompt_lower for phrase in ["high salience", "strong salience", "developed market"]):
+            if cat_salience is not None or brand_salience is not None:
+                reasons.append(f"high salience (cat: {cat_salience:.1f}%, brand: {brand_salience:.1f}%)")
+        
+        # Check for CPR condition
+        if any(phrase in prompt_lower for phrase in ["high cpr", "poor cpr", "expensive"]):
+            if cpr_band == "high_cost":
+                cpr_val = row.get("avg_cpr")
+                if cpr_val:
+                    reasons.append(f"high CPR (₹{cpr_val:.0f})")
+        
+        # Check for elasticity condition
+        if any(phrase in prompt_lower for phrase in ["low elasticity", "weak elasticity"]):
+            if responsiveness.lower() in {"low", "weak", "poor"}:
+                reasons.append(f"low elasticity ({responsiveness})")
+        
+        if any(phrase in prompt_lower for phrase in ["high elasticity", "strong elasticity"]):
+            if responsiveness.lower() in {"high", "strong", "good"}:
+                reasons.append(f"high elasticity ({responsiveness})")
+        
+        if reasons:
+            return f"Matched your criteria: {', '.join(reasons)}"
+        else:
+            return "Explicitly mentioned in your prompt"
+    
+    # Intelligence-based explanation
+    cat_band = str(row.get("category_salience_band", "unknown"))
+    brand_band = str(row.get("brand_salience_band", "unknown"))
+    share_band = str(row.get("market_share_band", "unknown"))
+    share_change_band = str(row.get("change_in_market_share_band", "neutral"))
+    equity_change_band = str(row.get("change_in_brand_equity_band", "neutral"))
+    
+    if action == "increase":
+        if cat_band == "high" or brand_band == "high":
+            return f"High opportunity ({cat_band} category salience, {brand_band} brand salience)"
+        return "Growth opportunity identified"
+    
+    elif action == "protect":
+        if share_band == "high":
+            return f"Core market with {share_band} market share - protecting position"
+        return "Stable market worth protecting"
+    
+    elif action == "recover":
+        if share_change_band in {"mild_negative", "strong_negative"}:
+            change_val = row.get("change_in_market_share", 0)
+            return f"Declining performance ({change_val:+.1f}% share change) - needs recovery"
+        if equity_change_band in {"mild_negative", "strong_negative"}:
+            return "Weakening brand equity - needs attention"
+        return "Recovery opportunity"
+    
+    elif action == "deprioritize":
+        reasons = []
+        if cat_band == "low" and brand_band == "low":
+            reasons.append("low salience")
+        if share_change_band == "strong_negative":
+            reasons.append("steep decline")
+        if reasons:
+            return f"Lower priority: {', '.join(reasons)}"
+        return "Lower priority market"
+    
+    elif action == "hold":
+        return "Stable market - maintain current allocation"
+    
+    elif action == "rebalance":
+        return "Rebalancing allocation across channels"
+    
+    elif action == "decrease":
+        return "Reducing allocation based on efficiency"
+    
+    return "Intelligence-based recommendation"
+
+
+def _build_resolved_intent_from_context(
+    prompt: str,
+    brand: str,
+    selected_markets: list[str],
+    market_rows: list[dict[str, Any]],
+    clarification_round: int = 0,
+    answers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    answers = answers or {}
+    combined_text = _combined_intent_text(prompt, answers)
+    explanation_notes: list[str] = []
+    objective = _resolve_objective_preference(
+        answers.get("q_business_objective", combined_text) if answers.get("q_business_objective") else combined_text
+    )
+    primary_anchor_metrics, secondary_anchor_metrics = _resolve_anchor_metrics(
+        answers.get("q_anchor_metric", combined_text) if answers.get("q_anchor_metric") else combined_text,
+        objective,
+    )
+    global_action_preference = _resolve_global_action_preference(
+        answers.get("q_market_direction", combined_text) if answers.get("q_market_direction") else combined_text,
+        objective,
+    )
+    extraction = _extract_prompt_market_actions(combined_text, selected_markets, market_rows)
+    explicit_market_actions = dict(extraction.get("actions", {}) or {})
+    interpreted_conditions = list(extraction.get("interpreted_conditions", []) or [])
+    explanation_notes.extend(list(extraction.get("notes", []) or []))
+    interpretation_summary = str(extraction.get("interpretation_summary", "") or "").strip()
+    structured_condition_detected = bool(extraction.get("structured_condition_detected"))
+    zero_match_condition_detected = bool(extraction.get("zero_match_condition_detected"))
+    practicality_level = _resolve_practicality_level(
+        answers.get("q_tradeoff_preference", combined_text) if answers.get("q_tradeoff_preference") else combined_text
+    )
+    aggressiveness_level = _resolve_aggressiveness_level(combined_text, objective)
+    action_preferences_by_market: dict[str, ScenarioMarketAction] = {}
+
+    if answers.get("q_market_direction"):
+        lower = answers["q_market_direction"].lower()
+        if "protect" in lower:
+            global_action_preference = "protect"
+        elif "rebalance" in lower:
+            global_action_preference = "rebalance"
+        elif "reduce" in lower:
+            global_action_preference = "decrease"
+        else:
+            global_action_preference = "increase"
+
+    if answers.get("q_anchor_metric"):
+        metric_token = _normalize_metric_token(answers["q_anchor_metric"])
+        if metric_token == "metric_mix":
+            primary_anchor_metrics = _dedupe_strings(primary_anchor_metrics)
+        else:
+            if metric_token not in primary_anchor_metrics:
+                secondary_anchor_metrics = _dedupe_strings(primary_anchor_metrics + secondary_anchor_metrics)
+                primary_anchor_metrics = [metric_token]
+    elif interpreted_conditions:
+        interpreted_metric_keys = [
+            str(item.get("metric_key", "")).strip()
+            for item in interpreted_conditions
+            if str(item.get("metric_key", "")).strip()
+        ]
+        if interpreted_metric_keys:
+            primary_anchor_metrics = _dedupe_strings(interpreted_metric_keys[:2])
+            secondary_anchor_metrics = _dedupe_strings(interpreted_metric_keys[2:4] + secondary_anchor_metrics)
+
+    negative_filters: list[str] = []
+    if _contains_any(combined_text, ("poor cpr", "weak cpr", "avoid inefficient", "efficiency first")):
+        negative_filters.append("avoid_high_cpr_markets")
+    if _contains_any(combined_text, ("weak elasticity", "low elasticity", "avoid weak responsiveness")):
+        negative_filters.append("avoid_low_elasticity_markets")
+    if _contains_any(combined_text, ("declining equity", "negative equity", "avoid weak equity")):
+        negative_filters.append("avoid_declining_brand_equity")
+    if _contains_any(combined_text, ("declining share", "share loss", "avoid weak share")):
+        negative_filters.append("avoid_declining_market_share")
+
+    target_markets: list[str] = []
+    protected_markets: list[str] = []
+    held_markets: list[str] = []
+    deprioritized_markets: list[str] = []
+    market_action_explanations: dict[str, str] = {}
+
+    apply_global_broadly = len(explicit_market_actions) == 0 and not structured_condition_detected
+
+    for row in market_rows:
+        market = str(row.get("market", "")).strip()
+        if not market:
+            continue
+        action = explicit_market_actions.get(market)
+        was_explicit = action is not None
+        
+        if action is None:
+            action = _default_market_action_from_intelligence(row)
+            # Only override with global preference if we should apply it broadly
+            # AND the intelligence-based action is "hold"
+            if apply_global_broadly and global_action_preference in {"increase", "decrease", "rebalance"} and action == "hold":
+                action = global_action_preference
+        if answers.get("q_protect_core_markets", "").lower().startswith("yes") and str(row.get("market_share_band", "")) == "high":
+            action = "protect" if action not in {"deprioritize", "decrease"} else action
+        
+        action_preferences_by_market[market] = action
+        
+        # Generate explanation for this market's action
+        explanation = _generate_market_action_explanation(market, action, row, was_explicit, combined_text)
+        market_action_explanations[market] = explanation
+        
+        if action in {"increase", "recover"}:
+            target_markets.append(market)
+        elif action == "protect":
+            protected_markets.append(market)
+        elif action == "deprioritize":
+            deprioritized_markets.append(market)
+        elif action == "hold":
+            held_markets.append(market)
+
+    if explicit_market_actions:
+        if structured_condition_detected:
+            explanation_notes.append(
+                f"Conditional market filtering applied: {len(explicit_market_actions)} markets matched the specified criteria from your prompt."
+            )
+        else:
+            explanation_notes.append("Explicit market instructions from the prompt were given precedence over inferred rankings.")
+    elif zero_match_condition_detected:
+        explanation_notes.append("The prompt referred to a specific market condition, but no selected markets matched it, so no blanket increase/decrease was applied.")
+    if answers.get("q_tradeoff_preference"):
+        explanation_notes.append(f"Trade-off preference applied: {answers['q_tradeoff_preference']}.")
+    if answers.get("q_protect_core_markets"):
+        explanation_notes.append(f"Core-market protection setting: {answers['q_protect_core_markets']}.")
+    if answers.get("q_interpretation_feedback"):
+        explanation_notes.append("User feedback was incorporated into the latest interpretation.")
+    if interpretation_summary:
+        explanation_notes.insert(0, interpretation_summary)
+
+    confidence_score = 0.2
+    if str(prompt or "").strip():
+        confidence_score += 0.15
+    if primary_anchor_metrics:
+        confidence_score += 0.2
+    if objective:
+        confidence_score += 0.2
+    if explicit_market_actions or global_action_preference not in {"hold", "rebalance"}:
+        confidence_score += 0.15
+    if interpreted_conditions:
+        confidence_score += min(0.12, 0.04 * len(interpreted_conditions))
+    if answers:
+        confidence_score += min(0.2, 0.08 * len([v for v in answers.values() if str(v or "").strip()]))
+    if len(selected_markets) <= 2 and not explicit_market_actions:
+        confidence_score -= 0.05
+    if zero_match_condition_detected:
+        confidence_score -= 0.08
+    confidence_score = max(0.05, min(0.98, confidence_score))
+
+    questions = _build_clarification_questions(
+        prompt=prompt,
+        clarification_round=clarification_round,
+        answers=answers,
+        objective=objective,
+        primary_anchor_metrics=primary_anchor_metrics,
+        explicit_market_actions=explicit_market_actions,
+        selected_markets=selected_markets,
+        market_rows=market_rows,
+    )
+    readiness_for_generation = bool(confidence_score >= 0.8 or clarification_round >= 2 or len(questions) == 0)
+    confirmation_required = bool(readiness_for_generation and confidence_score < 0.8)
+    if confirmation_required:
+        explanation_notes.append("Confidence remained below the auto-run threshold after the clarification limit; explicit user confirmation is required.")
+    analysis_plan = _build_analysis_plan(
+        prompt=prompt,
+        brand=brand,
+        selected_markets=selected_markets,
+        interpreted_conditions=interpreted_conditions,
+        primary_anchor_metrics=_dedupe_strings(primary_anchor_metrics),
+        secondary_anchor_metrics=_dedupe_strings(secondary_anchor_metrics),
+        explicit_market_actions=explicit_market_actions,
+        action_preferences_by_market=action_preferences_by_market,
+        objective=objective,
+        global_action_preference=global_action_preference,
+        negative_filters=_dedupe_strings(negative_filters),
+        confidence_score=confidence_score,
+        readiness_for_generation=readiness_for_generation,
+        confirmation_required=confirmation_required,
+        explanation_notes=_dedupe_strings(explanation_notes),
+    )
+
+    resolved_intent = ScenarioResolvedIntent(
+        analysis_plan=analysis_plan,
+        primary_anchor_metrics=_dedupe_strings(primary_anchor_metrics),
+        secondary_anchor_metrics=_dedupe_strings(secondary_anchor_metrics),
+        interpreted_conditions=interpreted_conditions,
+        interpretation_summary=interpretation_summary,
+        negative_filters=_dedupe_strings(negative_filters),
+        target_markets=_dedupe_strings(target_markets),
+        protected_markets=_dedupe_strings(protected_markets),
+        held_markets=_dedupe_strings(held_markets),
+        deprioritized_markets=_dedupe_strings(deprioritized_markets),
+        action_preferences_by_market=action_preferences_by_market,
+        market_action_explanations=market_action_explanations,
+        global_action_preference=global_action_preference,
+        objective_preference=objective,
+        aggressiveness_level=aggressiveness_level,
+        practicality_level=practicality_level,
+        confidence_score=round(float(confidence_score), 4),
+        readiness_for_generation=readiness_for_generation,
+        confirmation_required=confirmation_required,
+        explanation_notes=_dedupe_strings(explanation_notes),
+    ).model_dump(mode="json")
+    return {
+        "status": "ready" if readiness_for_generation else "needs_clarification",
+        "clarification_round": int(max(0, clarification_round)),
+        "confidence_score": round(float(confidence_score), 4),
+        "readiness_for_generation": readiness_for_generation,
+        "confirmation_required": confirmation_required,
+        "questions": questions if not readiness_for_generation else [],
+        "partial_interpretation": None if readiness_for_generation else resolved_intent,
+        "resolved_intent": resolved_intent if readiness_for_generation else None,
+        "notes": resolved_intent.get("explanation_notes", []),
+    }
+
+
+def _resolve_scenario_intent_payload(
+    payload: ScenarioIntentResolveRequest,
+    clarification_round: int = 0,
+    clarification_answers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    ctx = _load_optimization_context(
+        OptimizeAutoRequest(
+            selected_brand=payload.selected_brand,
+            selected_markets=payload.selected_markets,
+            budget_increase_type=payload.budget_increase_type,
+            budget_increase_value=payload.budget_increase_value,
+            market_overrides=payload.market_overrides,
+        )
+    )
+    market_guidance = dict(ctx.get("market_intelligence_guidance", {}) or {})
+    market_rows = market_guidance.get("rows", [])
+    if not isinstance(market_rows, list):
+        market_rows = []
+    if not market_rows:
+        market_rows = [{"market": region} for region in ctx.get("regions", []) if str(region).strip()]
+        notes = list(market_guidance.get("notes", []) or [])
+        notes.append("Market intelligence rows were unavailable for intent resolution; fallback region rows were used.")
+        market_guidance["notes"] = _dedupe_strings(notes)
+    result = _build_resolved_intent_from_context(
+        prompt=payload.intent_prompt,
+        brand=ctx["brand"],
+        selected_markets=ctx["regions"],
+        market_rows=market_rows,
+        clarification_round=clarification_round,
+        answers=clarification_answers,
+    )
+    result["market_intelligence_guidance"] = {
+        "source_file": market_guidance.get("source_file"),
+        "matched_row_count": int(market_guidance.get("matched_row_count", 0) or 0),
+        "notes": market_guidance.get("notes", []),
+    }
+    return result
+
+
 def _default_strategy_controls() -> dict[str, Any]:
     return {
         "family_mix_weights": {"volume": 0.4, "revenue": 0.4, "balanced": 0.2},
@@ -4032,6 +6963,171 @@ def _sanitize_strategy_controls(raw: dict[str, Any] | None) -> dict[str, Any]:
         "diversity_preference": diversity,
         "budget_zone_preference": budget_zone,
     }
+
+
+def _derive_plan_market_state(
+    intent: ScenarioResolvedIntent,
+    regions: list[str],
+) -> tuple[dict[str, ScenarioMarketAction], set[str], set[str], set[str], list[str]]:
+    analysis_plan = ScenarioAnalysisPlan.model_validate(intent.analysis_plan or {})
+    action_preferences: dict[str, ScenarioMarketAction] = {}
+    target_markets: set[str] = set()
+    protected_markets: set[str] = set()
+    deprioritized_markets: set[str] = set()
+    notes: list[str] = []
+
+    for rule in analysis_plan.prioritization_logic:
+        if str(rule.operator).strip() != "assign_action":
+            continue
+        action_value = str(rule.value).strip()
+        if action_value not in {"increase", "decrease", "protect", "hold", "deprioritize", "rebalance", "recover"}:
+            continue
+        for market in rule.markets:
+            market_name = str(market).strip()
+            if not market_name or market_name not in regions:
+                continue
+            action_preferences[market_name] = action_value  # type: ignore[assignment]
+            if action_value in {"increase", "recover"}:
+                target_markets.add(market_name)
+            elif action_value == "protect":
+                protected_markets.add(market_name)
+            elif action_value in {"decrease", "deprioritize"}:
+                deprioritized_markets.add(market_name)
+
+    for rule in analysis_plan.qualification_logic:
+        operator = str(rule.operator).strip()
+        if operator == "in":
+            for market in rule.markets:
+                market_name = str(market).strip()
+                if market_name and market_name in regions and market_name not in action_preferences:
+                    action_preferences[market_name] = intent.global_action_preference
+        if operator in {"band_equals", "trend_equals"} and rule.markets:
+            for market in rule.markets:
+                market_name = str(market).strip()
+                if not market_name or market_name not in regions:
+                    continue
+                if market_name not in action_preferences and intent.global_action_preference in {
+                    "increase",
+                    "decrease",
+                    "protect",
+                    "recover",
+                    "deprioritize",
+                    "rebalance",
+                }:
+                    action_preferences[market_name] = intent.global_action_preference
+
+    if action_preferences:
+        notes.append("Deterministic strategy controls were derived from the canonical analysis plan.")
+    return action_preferences, target_markets, protected_markets, deprioritized_markets, notes
+
+
+def _build_generation_strategy_from_resolved_intent(
+    resolved_intent: dict[str, Any] | None,
+    ctx: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    intent = ScenarioResolvedIntent.model_validate(resolved_intent or {})
+    objective = str(intent.objective_preference)
+    objective_weights = {
+        "volume": {"volume": 0.65, "revenue": 0.15, "balanced": 0.20},
+        "revenue": {"volume": 0.15, "revenue": 0.65, "balanced": 0.20},
+        "balanced": {"volume": 0.25, "revenue": 0.25, "balanced": 0.50},
+        "efficiency": {"volume": 0.20, "revenue": 0.50, "balanced": 0.30},
+        "practical_mix": {"volume": 0.25, "revenue": 0.25, "balanced": 0.50},
+    }
+    family_mix_weights = objective_weights.get(objective, objective_weights["balanced"])
+    aggressiveness = str(intent.aggressiveness_level)
+    practicality = str(intent.practicality_level)
+    if aggressiveness == "high":
+        pace_preference = "fast"
+        diversity_preference = "high"
+    elif aggressiveness == "low":
+        pace_preference = "steady"
+        diversity_preference = "low"
+    else:
+        pace_preference = "steady"
+        diversity_preference = "medium"
+    if practicality == "high":
+        coverage_preference = "few"
+    else:
+        coverage_preference = "broad"
+    if objective == "efficiency":
+        budget_zone_preference = "low"
+    elif objective == "volume":
+        budget_zone_preference = "high" if aggressiveness == "high" else "mid"
+    elif objective == "revenue":
+        budget_zone_preference = "mid"
+    elif objective == "practical_mix":
+        budget_zone_preference = "mid"
+    else:
+        budget_zone_preference = "mixed"
+
+    action_bias_map: dict[str, float] = {
+        "increase": 0.55,
+        "recover": 0.30,
+        "protect": 0.18,
+        "hold": 0.0,
+        "rebalance": 0.10,
+        "decrease": -0.30,
+        "deprioritize": -0.50,
+    }
+    responsiveness_multiplier = {"High": 1.0, "Medium": 0.85, "Low": 0.7, "Unknown": 0.82}
+    cpr_multiplier = {"low_cost": 1.0, "mid_cost": 0.86, "high_cost": 0.72, "unknown": 0.82}
+    intelligence_map = {
+        str(row.get("market", "")).strip(): row
+        for row in (ctx.get("market_intelligence_guidance", {}) or {}).get("rows", [])
+        if isinstance(row, dict) and str(row.get("market", "")).strip()
+    }
+
+    plan_action_preferences, plan_target_markets, plan_protected_markets, plan_deprioritized_markets, plan_notes = _derive_plan_market_state(
+        intent,
+        list(ctx["regions"]),
+    )
+    effective_action_preferences = dict(intent.action_preferences_by_market)
+    effective_action_preferences.update(plan_action_preferences)
+    target_markets = set(intent.target_markets) | plan_target_markets
+    protected_markets = set(intent.protected_markets) | plan_protected_markets
+    deprioritized_markets = set(intent.deprioritized_markets) | plan_deprioritized_markets
+
+    market_bias_scores: dict[str, float] = {}
+    notes: list[str] = list(plan_notes)
+    for region in ctx["regions"]:
+        action = effective_action_preferences.get(region, intent.global_action_preference if region in plan_action_preferences else "hold")
+        base_bias = float(action_bias_map.get(str(action), 0.0))
+        row = intelligence_map.get(region, {})
+        resp_mult = float(responsiveness_multiplier.get(str(row.get("responsiveness_label", "Unknown")), 0.82))
+        cpr_mult = float(cpr_multiplier.get(str(row.get("avg_cpr_band", "unknown")), 0.82))
+        if base_bias > 0:
+            if action == "protect":
+                adjusted = base_bias * max(0.68, 0.75 * resp_mult + 0.25)
+            else:
+                adjusted = base_bias * resp_mult * cpr_mult
+        else:
+            adjusted = base_bias
+        if region in target_markets and adjusted >= 0:
+            adjusted += 0.08
+        if region in protected_markets and adjusted >= 0:
+            adjusted = max(adjusted, 0.15)
+        if region in deprioritized_markets and adjusted <= 0:
+            adjusted -= 0.05
+        market_bias_scores[region] = round(float(max(-0.9, min(0.9, adjusted))), 4)
+
+    if any(v > 0 for v in market_bias_scores.values()):
+        notes.append("Positive market bias weights were dampened by elasticity and CPR where efficiency signals were weak.")
+    strategy = {
+        "family_mix_weights": family_mix_weights,
+        "pace_preference": pace_preference,
+        "coverage_preference": coverage_preference,
+        "diversity_preference": diversity_preference,
+        "budget_zone_preference": budget_zone_preference,
+        "objective_preference": objective,
+        "market_action_preferences": effective_action_preferences,
+        "market_bias_scores": market_bias_scores,
+    }
+    return _sanitize_strategy_controls(strategy) | {
+        "objective_preference": objective,
+        "market_action_preferences": effective_action_preferences,
+        "market_bias_scores": market_bias_scores,
+    }, notes
 
 
 def _call_gemini_for_strategy(intent_prompt: str, constraints_context: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -4148,18 +7244,30 @@ def _derive_sampling_params(strategy: dict[str, Any]) -> dict[str, Any]:
     coverage = strategy.get("coverage_preference", "broad")
     diversity = strategy.get("diversity_preference", "medium")
     budget_zone = str(strategy.get("budget_zone_preference", "mixed")).strip().lower()
+    objective = str(strategy.get("objective_preference", "balanced")).strip().lower()
     if budget_zone not in {"low", "mid", "high", "mixed"}:
         budget_zone = "mixed"
     near_sigma = 0.04 if pace == "steady" else 0.08
     broad_sigma = 0.20 if pace == "steady" else 0.35
     active_fraction = 1.0 if coverage == "broad" else 0.35
     distance_scale = {"low": 0.75, "medium": 1.0, "high": 1.3}.get(str(diversity), 1.0)
+    if objective == "volume":
+        channel_tilt = {"tv": 1.15, "digital": 1.0}
+    elif objective == "revenue":
+        channel_tilt = {"tv": 0.95, "digital": 1.1}
+    elif objective == "efficiency":
+        channel_tilt = {"tv": 0.9, "digital": 1.15}
+    else:
+        channel_tilt = {"tv": 1.0, "digital": 1.0}
     return {
         "near_sigma": near_sigma,
         "broad_sigma": broad_sigma,
         "active_fraction": active_fraction,
         "min_distance": SCENARIO_DEFAULT_MIN_DISTANCE * distance_scale,
         "budget_zone_preference": budget_zone,
+        "market_bias_scores": dict(strategy.get("market_bias_scores", {}) or {}),
+        "market_action_preferences": dict(strategy.get("market_action_preferences", {}) or {}),
+        "channel_tilt": channel_tilt,
     }
 
 
@@ -4230,9 +7338,19 @@ def _sample_candidate_vector(
     active_fraction = params["active_fraction"] if not near_opt else 1.0
     active_markets = max(1, int(round(market_count * active_fraction)))
     active_idx = set(rng.sample(range(market_count), active_markets)) if active_markets < market_count else set(range(market_count))
+    market_bias_scores = dict(params.get("market_bias_scores", {}) or {})
+    market_action_preferences = dict(params.get("market_action_preferences", {}) or {})
+    channel_tilt = dict(params.get("channel_tilt", {}) or {})
+    mandatory_idx = {
+        idx
+        for idx, region in enumerate(regions)
+        if abs(float(_finite(market_bias_scores.get(region, 0.0), 0.0))) >= 0.2
+    }
+    active_idx.update(mandatory_idx)
     for m_idx in range(market_count):
         if m_idx not in active_idx:
             continue
+        region = regions[m_idx]
         tv_i = 2 * m_idx
         dg_i = 2 * m_idx + 1
         tv_noise = rng.gauss(0.0, sigma)
@@ -4243,8 +7361,26 @@ def _sample_candidate_vector(
         elif family == "revenue":
             tv_noise -= abs(rng.gauss(0.0, sigma * 0.15))
             dg_noise += abs(rng.gauss(0.0, sigma * 0.15))
+        bias = float(_finite(market_bias_scores.get(region, 0.0), 0.0))
+        action = str(market_action_preferences.get(region, "hold"))
+        tv_bias = bias * sigma * float(_finite(channel_tilt.get("tv", 1.0), 1.0))
+        dg_bias = bias * sigma * float(_finite(channel_tilt.get("digital", 1.0), 1.0))
+        if action == "rebalance":
+            tv_bias += rng.gauss(0.0, sigma * 0.18)
+            dg_bias -= tv_bias * 0.75
+        tv_noise += tv_bias
+        dg_noise += dg_bias
         v[tv_i] += tv_noise
         v[dg_i] += dg_noise
+        if action == "protect":
+            v[tv_i] = max(v[tv_i], center[tv_i] - (sigma * 0.2))
+            v[dg_i] = max(v[dg_i], center[dg_i] - (sigma * 0.2))
+        elif action == "recover":
+            v[tv_i] = max(v[tv_i], center[tv_i] - (sigma * 0.12))
+            v[dg_i] = max(v[dg_i], center[dg_i] - (sigma * 0.12))
+        elif action in {"deprioritize", "decrease"}:
+            v[tv_i] = min(v[tv_i], center[tv_i] + (sigma * 0.15))
+            v[dg_i] = min(v[dg_i], center[dg_i] + (sigma * 0.15))
     for i, (lo, hi) in enumerate(bounds):
         v[i] = min(max(v[i], lo), hi)
     return v
@@ -4425,12 +7561,13 @@ def _generate_scenarios_for_context(
     rng = random.Random(_stable_score(f"{ctx['brand']}|{','.join(regions)}|{seed_budget}|{scenario_budget_lower}|{scenario_budget_upper}"))
 
     set_progress(20, "Computing deterministic seed scenarios...")
-    volume_seed, _ = _run_solver(market_data, regions, seed_budget, limits_map)
+    volume_seed, _ = _run_solver(market_data, regions, seed_budget, limits_map, overrides=ctx.get("overrides", {}))
     revenue_seed, _ = _run_solver_with_objective(
         market_data=market_data,
         regions=regions,
         B=seed_budget,
         limits_map=limits_map,
+        overrides=ctx.get("overrides", {}),
         objective_fn=_objective_revenue,
         objective_args=(region_prices,),
     )
@@ -4511,6 +7648,14 @@ def _generate_scenarios_for_context(
             baseline_budget,
         ):
             return False
+        if not _is_reach_share_targets_satisfied(
+            projected,
+            market_data,
+            regions,
+            ctx.get("overrides", {}),
+            tolerance_pct=REACH_SHARE_TARGET_TOLERANCE_PCT,
+        ):
+            return False
         key = _vector_key(projected)
         if key in exact_keys:
             return False
@@ -4519,7 +7664,14 @@ def _generate_scenarios_for_context(
             dists = np.linalg.norm(accepted_scaled - scaled, axis=1)
             if float(np.min(dists)) < min_distance:
                 return False
-        evaluated = _evaluate_solution_vector(projected, market_data, regions, limits_map, region_prices)
+        evaluated = _evaluate_solution_vector(
+            projected,
+            market_data,
+            regions,
+            limits_map,
+            region_prices,
+            overrides=ctx.get("overrides", {}),
+        )
         scenario = {
             "scenario_index": len(accepted) + 1,
             "scenario_id": f"SCN-{len(accepted) + 1:04d}",
@@ -4676,17 +7828,30 @@ def _run_scenario_job(job_id: str, payload: ScenarioJobCreateRequest) -> None:
                 market_overrides=payload.market_overrides,
             )
         )
-        constraints_context = {
-            "brand": ctx["brand"],
-            "market_count": len(ctx["regions"]),
-            "target_budget": round(float(ctx["target_budget"]), 4),
-            "baseline_budget": round(float(ctx["baseline_budget"]), 4),
-            "markets": ctx["regions"],
-            "scenario_budget_lower": payload.scenario_budget_lower,
-            "scenario_budget_upper": payload.scenario_budget_upper,
-        }
-        _update_scenario_job(job_id, progress=15, message="Translating intent into strategy controls...")
-        strategy, strategy_notes = _translate_intent_to_strategy(payload.intent_prompt, constraints_context)
+        _update_scenario_job(job_id, progress=15, message="Resolving scenario intent...")
+        if payload.resolved_intent is not None:
+            resolved_intent = ScenarioResolvedIntent.model_validate(payload.resolved_intent).model_dump(mode="json")
+            intent_notes = list(resolved_intent.get("explanation_notes", []))
+        else:
+            intent_resolution = _resolve_scenario_intent_payload(
+                ScenarioIntentResolveRequest(
+                    selected_brand=payload.selected_brand,
+                    selected_markets=payload.selected_markets,
+                    budget_increase_type=payload.budget_increase_type,
+                    budget_increase_value=payload.budget_increase_value,
+                    market_overrides=payload.market_overrides,
+                    intent_prompt=payload.intent_prompt,
+                ),
+                clarification_round=2,
+                clarification_answers={},
+            )
+            resolved_intent = dict(intent_resolution.get("resolved_intent") or {})
+            if not resolved_intent:
+                raise HTTPException(status_code=400, detail="Scenario intent could not be resolved for generation.")
+            intent_notes = list(intent_resolution.get("notes", []))
+
+        _update_scenario_job(job_id, progress=22, message="Building deterministic generation biases...")
+        strategy, strategy_notes = _build_generation_strategy_from_resolved_intent(resolved_intent, ctx)
 
         def set_progress(progress: int, message: str) -> None:
             _update_scenario_job(job_id, progress=max(0, min(99, int(progress))), message=message)
@@ -4703,7 +7868,8 @@ def _run_scenario_job(job_id: str, payload: ScenarioJobCreateRequest) -> None:
         result_payload = {
             "summary": artifacts["summary"],
             "anchors": artifacts["anchors"],
-            "generation_notes": [*strategy_notes, *artifacts["notes"]],
+            "resolved_intent": resolved_intent,
+            "generation_notes": [*intent_notes, *strategy_notes, *artifacts["notes"]],
             "scenarios": scenarios,
         }
         _update_scenario_job(
@@ -4738,6 +7904,9 @@ def _paginate_scenario_results(
     max_revenue_uplift_pct: float | None,
     min_budget_utilized_pct: float | None,
     max_budget_utilized_pct: float | None,
+    reach_share_market: str | None,
+    reach_share_direction: str | None,
+    min_reach_share_delta_pp: float | None,
     target_budget: float | None,
 ) -> dict[str, Any]:
     allowed_sort = {
@@ -4778,6 +7947,40 @@ def _paginate_scenario_results(
             items = [s for s in items if _util_pct(s) >= float(min_budget_utilized_pct)]
         if max_budget_utilized_pct is not None:
             items = [s for s in items if _util_pct(s) <= float(max_budget_utilized_pct)]
+    if reach_share_market:
+        market_key = str(reach_share_market).strip().lower()
+        direction = str(reach_share_direction or "").strip().lower()
+        min_delta = abs(float(_finite(min_reach_share_delta_pp, 0.0)))
+
+        def _reach_share_delta_pp(s: dict[str, Any]) -> float | None:
+            for row in s.get("markets", []) or []:
+                if str(row.get("market", "")).strip().lower() != market_key:
+                    continue
+                old_share = float(_finite(row.get("fy25_reach_share_pct"), np.nan))
+                new_share = float(_finite(row.get("new_reach_share_pct"), np.nan))
+                if np.isfinite(old_share) and np.isfinite(new_share):
+                    return new_share - old_share
+                return None
+            return None
+
+        if direction in {"higher", "increase", "inc", "up"}:
+            items = [
+                s
+                for s in items
+                if (lambda d: d is not None and d >= min_delta)(_reach_share_delta_pp(s))
+            ]
+        elif direction in {"lower", "decrease", "dec", "down"}:
+            items = [
+                s
+                for s in items
+                if (lambda d: d is not None and d <= -min_delta)(_reach_share_delta_pp(s))
+            ]
+        else:
+            items = [
+                s
+                for s in items
+                if (lambda d: d is not None and abs(d) >= min_delta)(_reach_share_delta_pp(s))
+            ]
 
     reverse = sort_dir == "desc"
     if sort_key == "scenario_id":
@@ -4816,6 +8019,25 @@ def _paginate_scenario_results(
         "sort_dir": sort_dir,
         "items": page_items,
     }
+
+
+def service_resolve_scenario_intent(payload: ScenarioIntentResolveRequest) -> dict[str, Any]:
+    return _resolve_scenario_intent_payload(payload, clarification_round=0, clarification_answers={})
+
+
+def service_clarify_scenario_intent(payload: ScenarioIntentClarifyRequest) -> dict[str, Any]:
+    return _resolve_scenario_intent_payload(
+        ScenarioIntentResolveRequest(
+            selected_brand=payload.selected_brand,
+            selected_markets=payload.selected_markets,
+            budget_increase_type=payload.budget_increase_type,
+            budget_increase_value=payload.budget_increase_value,
+            market_overrides=payload.market_overrides,
+            intent_prompt=payload.intent_prompt,
+        ),
+        clarification_round=max(1, int(payload.clarification_round)),
+        clarification_answers=dict(payload.clarification_answers or {}),
+    )
 
 
 def service_create_scenario_job(payload: ScenarioJobCreateRequest) -> dict[str, Any]:
@@ -4878,6 +8100,9 @@ def service_get_scenario_job_results(
     max_revenue_uplift_pct: float | None = None,
     min_budget_utilized_pct: float | None = None,
     max_budget_utilized_pct: float | None = None,
+    reach_share_market: str | None = None,
+    reach_share_direction: str | None = None,
+    min_reach_share_delta_pp: float | None = None,
 ) -> Any:
     job = _read_scenario_job(job_id)
     status = str(job.get("status", "queued"))
@@ -4930,6 +8155,9 @@ def service_get_scenario_job_results(
         max_revenue_uplift_pct=max_revenue_uplift_pct,
         min_budget_utilized_pct=min_budget_utilized_pct,
         max_budget_utilized_pct=max_budget_utilized_pct,
+        reach_share_market=reach_share_market,
+        reach_share_direction=reach_share_direction,
+        min_reach_share_delta_pp=min_reach_share_delta_pp,
         target_budget=float((result.get("summary") or {}).get("target_budget", 0.0)),
     )
     return {
@@ -5112,7 +8340,14 @@ def service_health() -> dict[str, str]:
 
 
 def service_auto_config() -> dict:
-    return _build_auto_config()
+    out = _build_auto_config()
+    # Fire-and-forget warmup so first-run insights become fast without blocking auto-config response.
+    trigger_insights_cache_warmup()
+    return out
+
+
+def service_insights_cache_status() -> dict[str, Any]:
+    return _insights_warmup_status_snapshot()
 
 
 def service_optimize_auto(payload: OptimizeAutoRequest) -> dict:
@@ -5134,8 +8369,14 @@ def service_constraints_auto(payload: OptimizeAutoRequest) -> dict:
 
 
 def service_s_curves_auto(payload: SCurveAutoRequest) -> dict:
+    cache_key = _insights_payload_cache_key("s_curves_auto", payload)
+    cached = _get_cached_insights_response(cache_key)
+    if cached is not None:
+        return cached
     try:
-        return _build_s_curves(payload)
+        result = _build_s_curves(payload)
+        _set_cached_insights_response(cache_key, result)
+        return result
     except HTTPException:
         raise
     except Exception as exc:
@@ -5143,8 +8384,14 @@ def service_s_curves_auto(payload: SCurveAutoRequest) -> dict:
 
 
 def service_contributions_auto(payload: ContributionAutoRequest) -> dict:
+    cache_key = _insights_payload_cache_key("contributions_auto", payload)
+    cached = _get_cached_insights_response(cache_key)
+    if cached is not None:
+        return cached
     try:
-        return _build_contribution_insights(payload)
+        result = _build_contribution_insights(payload)
+        _set_cached_insights_response(cache_key, result)
+        return result
     except HTTPException:
         raise
     except Exception as exc:
@@ -5152,12 +8399,33 @@ def service_contributions_auto(payload: ContributionAutoRequest) -> dict:
 
 
 def service_yoy_growth_auto(payload: YoyGrowthRequest) -> dict:
+    cache_key = _insights_payload_cache_key("yoy_growth_auto", payload)
+    cached = _get_cached_insights_response(cache_key)
+    if cached is not None:
+        return cached
     try:
-        return _build_yoy_growth_insights(payload)
+        result = _build_yoy_growth_insights(payload)
+        _set_cached_insights_response(cache_key, result)
+        return result
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"YoY growth insights failed: {exc}") from exc
+
+
+def service_driver_analysis_auto(payload: DriverAnalysisRequest) -> dict:
+    cache_key = _insights_payload_cache_key("driver_analysis_auto", payload)
+    cached = _get_cached_insights_response(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        result = _build_driver_analysis(payload)
+        _set_cached_insights_response(cache_key, result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Driver analysis failed: {exc}") from exc
 
 
 def service_insights_ai_summary(payload: InsightsAIRequest) -> dict:
