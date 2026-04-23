@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.services.engine import service_auto_config, service_health
+from app.services.engine import service_auto_config, service_health, service_insights_cache_status
 
 router = APIRouter(tags=["system"])
 
@@ -14,3 +14,7 @@ async def health() -> dict[str, str]:
 async def auto_config() -> dict:
     return service_auto_config()
 
+
+@router.get("/api/insights-cache-status")
+async def insights_cache_status() -> dict:
+    return service_insights_cache_status()

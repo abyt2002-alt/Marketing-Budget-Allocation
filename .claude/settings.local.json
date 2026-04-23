@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(netstat -ano)",
+      "Bash(taskkill /F /IM python.exe)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}

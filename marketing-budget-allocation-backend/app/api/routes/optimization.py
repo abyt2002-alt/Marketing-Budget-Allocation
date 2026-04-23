@@ -3,12 +3,14 @@ from fastapi import APIRouter
 from app.services.engine import (
     BrandAllocationRequest,
     ContributionAutoRequest,
+    DriverAnalysisRequest,
     OptimizeAutoRequest,
     SCurveAutoRequest,
     YoyGrowthRequest,
     service_brand_allocation,
     service_constraints_auto,
     service_contributions_auto,
+    service_driver_analysis_auto,
     service_optimize_auto,
     service_s_curves_auto,
     service_yoy_growth_auto,
@@ -42,7 +44,11 @@ async def yoy_growth_auto(payload: YoyGrowthRequest) -> dict:
     return service_yoy_growth_auto(payload)
 
 
+@router.post("/api/driver-analysis-auto")
+async def driver_analysis_auto(payload: DriverAnalysisRequest) -> dict:
+    return service_driver_analysis_auto(payload)
+
+
 @router.post("/api/brand-allocation")
 async def brand_allocation(payload: BrandAllocationRequest) -> dict:
     return service_brand_allocation(payload)
-

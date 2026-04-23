@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -12,8 +12,14 @@
   }
 
   body {
-    @apply m-0 bg-slate-100 font-sans text-dark-text antialiased;
-    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    @apply m-0 font-sans text-dark-text antialiased;
+    font-family: 'Sora', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    background-color: #f3eee3;
+    background-image:
+      radial-gradient(circle at top left, rgba(190, 167, 132, 0.18), transparent 28%),
+      radial-gradient(circle at bottom right, rgba(112, 139, 180, 0.14), transparent 24%),
+      linear-gradient(180deg, #f7f3ea 0%, #efe8da 100%);
+    background-attachment: fixed;
   }
 
   input.no-spinner::-webkit-outer-spin-button,
@@ -25,5 +31,62 @@
   input.no-spinner[type='number'] {
     -moz-appearance: textfield;
     appearance: textfield;
+  }
+}
+
+@layer components {
+  .budget-shell {
+    @apply relative overflow-hidden rounded-[32px] border px-5 py-6 sm:px-6 sm:py-7 lg:px-8;
+    border-color: #d8d0c2;
+    background:
+      radial-gradient(circle at top right, rgba(121, 92, 51, 0.12), transparent 28%),
+      linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(246, 240, 230, 0.88));
+    box-shadow: 0 28px 70px rgba(74, 54, 29, 0.08);
+  }
+
+  .budget-panel {
+    @apply rounded-[28px] border p-5 sm:p-6;
+    border-color: #d8d0c2;
+    background: rgba(255, 255, 255, 0.86);
+    backdrop-filter: blur(14px);
+    box-shadow: 0 24px 50px rgba(74, 54, 29, 0.06);
+  }
+
+  .budget-soft-card {
+    @apply rounded-[22px] border p-4;
+    border-color: #e7dfd3;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(250, 246, 239, 0.92));
+  }
+
+  .budget-field {
+    @apply rounded-[24px] border p-4;
+    border-color: #e7dfd3;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(250, 246, 239, 0.7));
+  }
+
+  .budget-metric {
+    @apply rounded-[22px] border p-4;
+    border-color: #e7dfd3;
+    background: rgba(255, 255, 255, 0.82);
+  }
+
+  .budget-chip {
+    @apply rounded-full border px-3 py-1.5 text-xs font-semibold uppercase;
+    border-color: #d7cbb7;
+    background: rgba(255, 255, 255, 0.8);
+    color: #6f5633;
+    letter-spacing: 0.12em;
+  }
+
+  .budget-kicker {
+    @apply inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase;
+    color: #8c7554;
+    letter-spacing: 0.24em;
+  }
+
+  .budget-label {
+    @apply text-[11px] font-semibold uppercase;
+    color: #8c7554;
+    letter-spacing: 0.2em;
   }
 }
