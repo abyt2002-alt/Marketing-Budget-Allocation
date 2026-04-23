@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -46,7 +47,7 @@ _INSIGHTS_WARMUP_STATUS: dict[str, Any] = {
     "last_error": None,
 }
 SCENARIO_JOB_TTL_SECONDS = 24 * 60 * 60
-SCENARIO_TARGET_TOTAL = 1000
+SCENARIO_TARGET_TOTAL = 5000
 SCENARIO_TARGET_DEFAULT = 1000
 SCENARIO_TARGET_NEAR_OPT = 100
 SCENARIO_NEAR_OPT_MIN_DISTANCE = 0.04
@@ -85,6 +86,7 @@ class ScenarioJobCreateRequest(BaseModel):
     market_overrides: dict[str, dict[str, float]] = Field(default_factory=dict)
     intent_prompt: str = ""
     resolved_intent: dict[str, Any] | None = None
+    strategy_override: dict[str, Any] | None = None
     scenario_budget_lower: float | None = None
     scenario_budget_upper: float | None = None
     target_scenarios: int = SCENARIO_TARGET_DEFAULT
@@ -1782,6 +1784,66 @@ def _objective_revenue(
     return -total_revenue
 
 
+def _build_fast_seed_vector(
+    market_data: dict[str, dict[str, Any]],
+    regions: list[str],
+    bounds: list[tuple[float, float]],
+    baseline_budget: float,
+    target_budget: float,
+    region_prices: dict[str, float],
+    objective: str = "volume",
+) -> np.ndarray:
+    vector = np.zeros(2 * len(regions), dtype=float)
+    increasing_budget = float(target_budget) >= float(baseline_budget)
+
+    for idx, region in enumerate(regions):
+        md = market_data[region]
+        tv_i = 2 * idx
+        dg_i = tv_i + 1
+        tv_lo, tv_hi = bounds[tv_i]
+        dg_lo, dg_hi = bounds[dg_i]
+
+        tv_probe = min(max(0.12, min(0.3, tv_hi)), tv_hi) if increasing_budget else max(min(-0.12, max(-0.3, tv_lo)), tv_lo)
+        dg_probe = min(max(0.12, min(0.3, dg_hi)), dg_hi) if increasing_budget else max(min(-0.12, max(-0.3, dg_lo)), dg_lo)
+
+        base_volume = float(_predict_region_volume(md, 0.0, 0.0))
+        tv_volume = float(_predict_region_volume(md, tv_probe, 0.0)) if abs(tv_probe) > 1e-9 else base_volume
+        dg_volume = float(_predict_region_volume(md, 0.0, dg_probe)) if abs(dg_probe) > 1e-9 else base_volume
+
+        price = max(0.0, float(_finite(region_prices.get(region, 1.0), 1.0)))
+        metric_scale = price if objective == "revenue" else 1.0
+        tv_metric_gain = (tv_volume - base_volume) * metric_scale
+        dg_metric_gain = (dg_volume - base_volume) * metric_scale
+
+        tv_cost = max(1.0, abs(float(np.sum(md["r_tv_list"])) * float(md["tv_cpr"]) * tv_probe))
+        dg_cost = max(1.0, abs(float(np.sum(md["r_dig_list"])) * float(md["digital_cpr"]) * dg_probe))
+        tv_roi = float(tv_metric_gain / tv_cost) if np.isfinite(tv_metric_gain) else 0.0
+        dg_roi = float(dg_metric_gain / dg_cost) if np.isfinite(dg_metric_gain) else 0.0
+
+        if increasing_budget:
+            tv_score = max(0.0, tv_roi)
+            dg_score = max(0.0, dg_roi)
+            score_sum = tv_score + dg_score
+            if score_sum <= 1e-12:
+                vector[tv_i] = min(tv_hi, max(0.0, tv_probe))
+                vector[dg_i] = min(dg_hi, max(0.0, dg_probe))
+            else:
+                vector[tv_i] = min(tv_hi, max(0.0, tv_hi * (tv_score / score_sum)))
+                vector[dg_i] = min(dg_hi, max(0.0, dg_hi * (dg_score / score_sum)))
+        else:
+            tv_score = max(0.0, -tv_roi)
+            dg_score = max(0.0, -dg_roi)
+            score_sum = tv_score + dg_score
+            if score_sum <= 1e-12:
+                vector[tv_i] = max(tv_lo, min(0.0, tv_probe))
+                vector[dg_i] = max(dg_lo, min(0.0, dg_probe))
+            else:
+                vector[tv_i] = max(tv_lo, min(0.0, tv_lo * (tv_score / score_sum)))
+                vector[dg_i] = max(dg_lo, min(0.0, dg_lo * (dg_score / score_sum)))
+
+    return vector
+
+
 def _budget_constraint(v: np.ndarray, market_data: dict[str, dict[str, Any]], regions: list[str], B: float) -> float:
     total_spend = 0.0
     for i, region in enumerate(regions):
@@ -2112,6 +2174,83 @@ def _budget_epsilon(target_budget: float) -> float:
     return max(1.0, 1e-8 * abs(float(target_budget)))
 
 
+SCENARIO_MARKET_LIMIT_ROUNDING = 1_000_000.0
+SCENARIO_MARKET_CHANGE_STEP = 2_500_000.0
+
+
+def _round_to_unit(value: float, unit: float) -> float:
+    if unit <= 0:
+        return float(value)
+    return float(round(float(value) / float(unit)) * float(unit))
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return float(min(max(float(value), float(lower)), float(upper)))
+
+
+def _quantize_market_total_spend(
+    current_spend: float,
+    proposed_spend: float,
+    min_spend: float,
+    max_spend: float,
+    step: float = SCENARIO_MARKET_CHANGE_STEP,
+) -> float:
+    min_spend = float(min(min_spend, max_spend))
+    max_spend = float(max(min_spend, max_spend))
+    proposed_spend = _clamp(proposed_spend, min_spend, max_spend)
+    delta = float(proposed_spend - current_spend)
+    quantized_delta = _round_to_unit(delta, step)
+    quantized_total = _clamp(current_spend + quantized_delta, min_spend, max_spend)
+    return float(quantized_total)
+
+
+def _allocate_two_channel_spend(
+    target_total: float,
+    proposed_tv_spend: float,
+    proposed_digital_spend: float,
+    min_tv_spend: float,
+    max_tv_spend: float,
+    min_digital_spend: float,
+    max_digital_spend: float,
+) -> tuple[float, float] | None:
+    target_total = float(target_total)
+    min_tv_spend = float(min_tv_spend)
+    max_tv_spend = float(max(max_tv_spend, min_tv_spend))
+    min_digital_spend = float(min_digital_spend)
+    max_digital_spend = float(max(max_digital_spend, min_digital_spend))
+    feasible_min = min_tv_spend + min_digital_spend
+    feasible_max = max_tv_spend + max_digital_spend
+    if target_total < feasible_min - 1e-6 or target_total > feasible_max + 1e-6:
+        return None
+
+    total_proposed = float(max(0.0, proposed_tv_spend) + max(0.0, proposed_digital_spend))
+    tv_share = (float(max(0.0, proposed_tv_spend)) / total_proposed) if total_proposed > 1e-9 else 0.5
+    tv_spend = _clamp(target_total * tv_share, min_tv_spend, max_tv_spend)
+    digital_spend = target_total - tv_spend
+
+    if digital_spend < min_digital_spend:
+        digital_spend = min_digital_spend
+        tv_spend = target_total - digital_spend
+    elif digital_spend > max_digital_spend:
+        digital_spend = max_digital_spend
+        tv_spend = target_total - digital_spend
+
+    tv_spend = _clamp(tv_spend, min_tv_spend, max_tv_spend)
+    digital_spend = target_total - tv_spend
+    if digital_spend < min_digital_spend:
+        digital_spend = min_digital_spend
+        tv_spend = target_total - digital_spend
+    elif digital_spend > max_digital_spend:
+        digital_spend = max_digital_spend
+        tv_spend = target_total - digital_spend
+
+    if tv_spend < min_tv_spend - 1e-6 or tv_spend > max_tv_spend + 1e-6:
+        return None
+    if digital_spend < min_digital_spend - 1e-6 or digital_spend > max_digital_spend + 1e-6:
+        return None
+    return float(tv_spend), float(digital_spend)
+
+
 def _build_variable_bounds_and_coeffs(
     market_data: dict[str, dict[str, Any]],
     regions: list[str],
@@ -2132,10 +2271,20 @@ def _build_variable_bounds_and_coeffs(
 
         baseline_budget += tv_base * tv_cpr + dg_base * dg_cpr
 
-        tv_min_reach = float(lim.get("tv_min_reach", tv_base * tv_low) or 0.0)
-        tv_max_reach = float(lim.get("tv_max_reach", tv_base * tv_high) or (tv_base * tv_high))
-        dg_min_reach = float(lim.get("dg_min_reach", dg_base * dg_low) or 0.0)
-        dg_max_reach = float(lim.get("dg_max_reach", dg_base * dg_high) or (dg_base * dg_high))
+        tv_min_spend_raw = float(lim.get("min_tv_spend", tv_base * tv_cpr * tv_low) or 0.0)
+        tv_max_spend_raw = float(lim.get("max_tv_spend", tv_base * tv_cpr * tv_high) or (tv_base * tv_cpr * tv_high))
+        dg_min_spend_raw = float(lim.get("min_digital_spend", dg_base * dg_cpr * dg_low) or 0.0)
+        dg_max_spend_raw = float(lim.get("max_digital_spend", dg_base * dg_cpr * dg_high) or (dg_base * dg_cpr * dg_high))
+
+        tv_min_spend = max(0.0, _round_to_unit(tv_min_spend_raw, SCENARIO_MARKET_LIMIT_ROUNDING))
+        tv_max_spend = max(tv_min_spend, _round_to_unit(tv_max_spend_raw, SCENARIO_MARKET_LIMIT_ROUNDING))
+        dg_min_spend = max(0.0, _round_to_unit(dg_min_spend_raw, SCENARIO_MARKET_LIMIT_ROUNDING))
+        dg_max_spend = max(dg_min_spend, _round_to_unit(dg_max_spend_raw, SCENARIO_MARKET_LIMIT_ROUNDING))
+
+        tv_min_reach = (tv_min_spend / tv_cpr) if tv_cpr > 1e-12 else float(lim.get("tv_min_reach", tv_base * tv_low) or 0.0)
+        tv_max_reach = (tv_max_spend / tv_cpr) if tv_cpr > 1e-12 else float(lim.get("tv_max_reach", tv_base * tv_high) or (tv_base * tv_high))
+        dg_min_reach = (dg_min_spend / dg_cpr) if dg_cpr > 1e-12 else float(lim.get("dg_min_reach", dg_base * dg_low) or 0.0)
+        dg_max_reach = (dg_max_spend / dg_cpr) if dg_cpr > 1e-12 else float(lim.get("dg_max_reach", dg_base * dg_high) or (dg_base * dg_high))
 
         x_min = max(-0.999, tv_low - 1.0, (tv_min_reach / tv_base - 1.0) if tv_base > 1e-12 else -0.999)
         x_max = min(4.0, tv_high - 1.0, (tv_max_reach / tv_base - 1.0) if tv_base > 1e-12 else 4.0)
@@ -2153,6 +2302,70 @@ def _build_variable_bounds_and_coeffs(
         coeffs.append(float(dg_base * dg_cpr))
 
     return bounds, np.array(coeffs, dtype=float), float(baseline_budget)
+
+
+def _quantize_vector_to_market_budget_steps(
+    vector: np.ndarray,
+    market_data: dict[str, dict[str, Any]],
+    regions: list[str],
+    limits_map: dict[str, dict[str, float | None]],
+    bounds: list[tuple[float, float]],
+) -> np.ndarray | None:
+    v = np.array(vector, dtype=float)
+    if len(v) != len(bounds):
+        return None
+
+    for i, region in enumerate(regions):
+        md = market_data[region]
+        lim = limits_map.get(region, {})
+        tv_base = float(np.sum(md["r_tv_list"]))
+        dg_base = float(np.sum(md["r_dig_list"]))
+        tv_cpr = float(md["tv_cpr"])
+        dg_cpr = float(md["digital_cpr"])
+        old_tv_spend = tv_base * tv_cpr
+        old_digital_spend = dg_base * dg_cpr
+        current_total_spend = float(md["current_spend"])
+
+        proposed_tv_spend = old_tv_spend * (1.0 + float(v[2 * i]))
+        proposed_digital_spend = old_digital_spend * (1.0 + float(v[2 * i + 1]))
+        proposed_total_spend = proposed_tv_spend + proposed_digital_spend
+
+        min_tv_spend = max(0.0, _round_to_unit(float(lim.get("min_tv_spend", 0.0) or 0.0), SCENARIO_MARKET_LIMIT_ROUNDING))
+        max_tv_spend = max(min_tv_spend, _round_to_unit(float(lim.get("max_tv_spend", old_tv_spend * 3.0) or (old_tv_spend * 3.0)), SCENARIO_MARKET_LIMIT_ROUNDING))
+        min_digital_spend = max(0.0, _round_to_unit(float(lim.get("min_digital_spend", 0.0) or 0.0), SCENARIO_MARKET_LIMIT_ROUNDING))
+        max_digital_spend = max(min_digital_spend, _round_to_unit(float(lim.get("max_digital_spend", old_digital_spend * 3.0) or (old_digital_spend * 3.0)), SCENARIO_MARKET_LIMIT_ROUNDING))
+
+        min_total_spend = min_tv_spend + min_digital_spend
+        max_total_spend = max_tv_spend + max_digital_spend
+        target_total_spend = _quantize_market_total_spend(
+            current_spend=current_total_spend,
+            proposed_spend=proposed_total_spend,
+            min_spend=min_total_spend,
+            max_spend=max_total_spend,
+            step=SCENARIO_MARKET_CHANGE_STEP,
+        )
+
+        allocated = _allocate_two_channel_spend(
+            target_total=target_total_spend,
+            proposed_tv_spend=proposed_tv_spend,
+            proposed_digital_spend=proposed_digital_spend,
+            min_tv_spend=min_tv_spend,
+            max_tv_spend=max_tv_spend,
+            min_digital_spend=min_digital_spend,
+            max_digital_spend=max_digital_spend,
+        )
+        if allocated is None:
+            return None
+        tv_target_spend, dg_target_spend = allocated
+
+        x = ((tv_target_spend / old_tv_spend) - 1.0) if old_tv_spend > 1e-12 else 0.0
+        y = ((dg_target_spend / old_digital_spend) - 1.0) if old_digital_spend > 1e-12 else 0.0
+        x_lo, x_hi = bounds[2 * i]
+        y_lo, y_hi = bounds[2 * i + 1]
+        v[2 * i] = _clamp(x, x_lo, x_hi)
+        v[2 * i + 1] = _clamp(y, y_lo, y_hi)
+
+    return v
 
 
 def _project_vector_to_budget(
@@ -6965,6 +7178,16 @@ def _sanitize_strategy_controls(raw: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _merge_strategy_override(base_strategy: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
+    if not override:
+        return dict(base_strategy)
+    cleaned = _sanitize_strategy_controls(override)
+    merged = dict(base_strategy)
+    for key in ("family_mix_weights", "pace_preference", "coverage_preference", "diversity_preference", "budget_zone_preference"):
+        merged[key] = cleaned[key]
+    return merged
+
+
 def _derive_plan_market_state(
     intent: ScenarioResolvedIntent,
     regions: list[str],
@@ -7561,15 +7784,23 @@ def _generate_scenarios_for_context(
     rng = random.Random(_stable_score(f"{ctx['brand']}|{','.join(regions)}|{seed_budget}|{scenario_budget_lower}|{scenario_budget_upper}"))
 
     set_progress(20, "Computing deterministic seed scenarios...")
-    volume_seed, _ = _run_solver(market_data, regions, seed_budget, limits_map, overrides=ctx.get("overrides", {}))
-    revenue_seed, _ = _run_solver_with_objective(
+    volume_seed = _build_fast_seed_vector(
         market_data=market_data,
         regions=regions,
-        B=seed_budget,
-        limits_map=limits_map,
-        overrides=ctx.get("overrides", {}),
-        objective_fn=_objective_revenue,
-        objective_args=(region_prices,),
+        bounds=bounds,
+        baseline_budget=baseline_budget,
+        target_budget=seed_budget,
+        region_prices=region_prices,
+        objective="volume",
+    )
+    revenue_seed = _build_fast_seed_vector(
+        market_data=market_data,
+        regions=regions,
+        bounds=bounds,
+        baseline_budget=baseline_budget,
+        target_budget=seed_budget,
+        region_prices=region_prices,
+        objective="revenue",
     )
     balanced_seed = (np.array(volume_seed, dtype=float) + np.array(revenue_seed, dtype=float)) / 2.0
     for i, (lo, hi) in enumerate(bounds):
@@ -7585,16 +7816,14 @@ def _generate_scenarios_for_context(
     timeout_hit = False
 
     accepted: list[dict[str, Any]] = []
-    accepted_vectors: list[np.ndarray] = []
     low = np.array([lo for lo, _ in bounds], dtype=float)
     span = np.array([max(1e-9, hi - lo) for lo, hi in bounds], dtype=float)
-    accepted_scaled = np.empty((0, len(bounds)), dtype=float)
-    exact_keys: set[tuple[float, ...]] = set()
     near_count = 0
     attempts = 0
     notes: list[str] = []
     if budget_adjust_note:
         notes.append(budget_adjust_note)
+    notes.append("Used fast deterministic seed builder to avoid slow optimization stalls during scenario generation.")
     if scenario_budget_upper - scenario_budget_lower > _budget_epsilon(scenario_budget_upper):
         notes.append(
             f"Scenario budget band active: {round(scenario_budget_lower, 2)} to {round(scenario_budget_upper, 2)}."
@@ -7602,171 +7831,236 @@ def _generate_scenarios_for_context(
 
     budget_zone_preference = str(params.get("budget_zone_preference", "mixed"))
 
-    def try_accept_candidate(
-        vec: np.ndarray,
-        family: str,
-        seed_source: str,
-        near_opt: bool,
-        budget_target: float | None = None,
-    ) -> bool:
-        nonlocal near_count, accepted_scaled
-        sampled_budget_target = (
-            float(budget_target)
-            if budget_target is not None
-            else _sample_budget_target_in_band(
-                lower_budget=scenario_budget_lower,
-                upper_budget=scenario_budget_upper,
-                budget_zone_preference=budget_zone_preference,
-                near_opt=near_opt,
-                rng=rng,
+    def timed_out() -> bool:
+        return (time.time() - started_at) >= runtime_limit
+
+    family_weights = _normalize_family_weights(strategy.get("family_mix_weights"))
+    active_families = [fam for fam, weight in family_weights.items() if float(weight) > 1e-9 and fam in seeds]
+    if not active_families:
+        active_families = [fam for fam in seeds.keys()]
+    family_weight_sum = float(sum(family_weights.get(fam, 0.0) for fam in active_families)) or float(len(active_families))
+
+    family_targets: dict[str, int] = {}
+    remaining_target = int(target_total)
+    for idx, fam in enumerate(active_families):
+        if idx == len(active_families) - 1:
+            family_targets[fam] = max(0, remaining_target)
+            break
+        fam_weight = float(family_weights.get(fam, 0.0)) / family_weight_sum
+        fam_target = int(round(target_total * fam_weight))
+        fam_target = max(1, min(remaining_target, fam_target))
+        family_targets[fam] = fam_target
+        remaining_target -= fam_target
+
+    family_near_targets: dict[str, int] = {}
+    remaining_near = int(target_near)
+    for idx, fam in enumerate(active_families):
+        if idx == len(active_families) - 1:
+            family_near_targets[fam] = max(0, min(family_targets.get(fam, 0), remaining_near))
+            break
+        fam_weight = float(family_weights.get(fam, 0.0)) / family_weight_sum
+        fam_near = int(round(target_near * fam_weight))
+        fam_near = max(0, min(family_targets.get(fam, 0), fam_near))
+        family_near_targets[fam] = fam_near
+        remaining_near -= fam_near
+
+    def generate_family_batch(fam: str, target_count: int, near_target_count: int) -> dict[str, Any]:
+        local_seed = _stable_score(
+            f"{ctx['brand']}|{fam}|{seed_budget}|{scenario_budget_lower}|{scenario_budget_upper}|{target_count}"
+        )
+        local_rng = random.Random(local_seed)
+        local_accepted: list[dict[str, Any]] = []
+        local_scaled = np.empty((0, len(bounds)), dtype=float)
+        local_exact_keys: set[tuple[float, ...]] = set()
+        local_near_count = 0
+        local_attempts = 0
+        local_notes: list[str] = []
+        worker_min_distance = float(min_distance)
+        worker_timeout_hit = False
+        worker_target_count = max(target_count, int(math.ceil(target_count * 1.15)))
+
+        def local_try_accept_candidate(
+            vec: np.ndarray,
+            seed_source: str,
+            near_opt: bool,
+            budget_target: float | None = None,
+        ) -> bool:
+            nonlocal local_near_count, local_scaled
+            sampled_budget_target = (
+                float(budget_target)
+                if budget_target is not None
+                else _sample_budget_target_in_band(
+                    lower_budget=scenario_budget_lower,
+                    upper_budget=scenario_budget_upper,
+                    budget_zone_preference=budget_zone_preference,
+                    near_opt=near_opt,
+                    rng=local_rng,
+                )
             )
-        )
-        projected = _project_vector_to_budget(
-            vec,
-            sampled_budget_target,
-            bounds,
-            coeffs,
-            baseline_budget,
-        )
-        if projected is None:
-            projected = _project_vector_to_budget_band(
-                vec,
+            projected = _project_vector_to_budget(vec, sampled_budget_target, bounds, coeffs, baseline_budget)
+            if projected is None:
+                projected = _project_vector_to_budget_band(
+                    vec,
+                    scenario_budget_lower,
+                    scenario_budget_upper,
+                    bounds,
+                    coeffs,
+                    baseline_budget,
+                )
+            if projected is None:
+                return False
+            projected = _quantize_vector_to_market_budget_steps(projected, market_data, regions, limits_map, bounds)
+            if projected is None:
+                return False
+            if not _is_vector_feasible_in_budget_band(
+                projected,
                 scenario_budget_lower,
                 scenario_budget_upper,
                 bounds,
                 coeffs,
                 baseline_budget,
-            )
-        if projected is None:
-            return False
-        if not _is_vector_feasible_in_budget_band(
-            projected,
-            scenario_budget_lower,
-            scenario_budget_upper,
-            bounds,
-            coeffs,
-            baseline_budget,
-        ):
-            return False
-        if not _is_reach_share_targets_satisfied(
-            projected,
-            market_data,
-            regions,
-            ctx.get("overrides", {}),
-            tolerance_pct=REACH_SHARE_TARGET_TOLERANCE_PCT,
-        ):
-            return False
-        key = _vector_key(projected)
-        if key in exact_keys:
-            return False
-        scaled = (projected - low) / span
-        if accepted_scaled.shape[0] > 0:
-            dists = np.linalg.norm(accepted_scaled - scaled, axis=1)
-            if float(np.min(dists)) < min_distance:
+            ):
                 return False
-        evaluated = _evaluate_solution_vector(
-            projected,
-            market_data,
-            regions,
-            limits_map,
-            region_prices,
-            overrides=ctx.get("overrides", {}),
-        )
-        scenario = {
-            "scenario_index": len(accepted) + 1,
-            "scenario_id": f"SCN-{len(accepted) + 1:04d}",
-            "family": family.capitalize(),
-            "seed_source": seed_source,
-            "tv_digital_vector": [round(float(x), 6) for x in projected.tolist()],
-            "volume_uplift_abs": round(float(evaluated["total_volume_uplift"]), 4),
-            "volume_uplift_pct": round(float(evaluated["total_volume_uplift_pct"]), 4),
-            "revenue_uplift_abs": round(float(evaluated["revenue_uplift_abs"]), 4),
-            "revenue_uplift_pct": round(float(evaluated["revenue_uplift_pct"]), 4),
-            "baseline_revenue": round(float(evaluated["baseline_revenue"]), 4),
-            "new_revenue": round(float(evaluated["new_revenue"]), 4),
-            "total_new_spend": round(float(evaluated["total_spend"]), 4),
-            "weighted_tv_share": round(float(evaluated["weighted_tv_share"]), 6),
-            "weighted_digital_share": round(float(evaluated["weighted_digital_share"]), 6),
-            "markets": evaluated["rows"],
+            if not _is_reach_share_targets_satisfied(
+                projected,
+                market_data,
+                regions,
+                ctx.get("overrides", {}),
+                tolerance_pct=REACH_SHARE_TARGET_TOLERANCE_PCT,
+            ):
+                return False
+            key = _vector_key(projected)
+            if key in local_exact_keys:
+                return False
+            scaled = (projected - low) / span
+            if local_scaled.shape[0] > 0:
+                dists = np.linalg.norm(local_scaled - scaled, axis=1)
+                if float(np.min(dists)) < worker_min_distance:
+                    return False
+            evaluated = _evaluate_solution_vector(
+                projected,
+                market_data,
+                regions,
+                limits_map,
+                region_prices,
+                overrides=ctx.get("overrides", {}),
+            )
+            local_accepted.append(
+                {
+                    "scenario_index": 0,
+                    "scenario_id": "",
+                    "family": fam.capitalize(),
+                    "seed_source": seed_source,
+                    "tv_digital_vector": [round(float(x), 6) for x in projected.tolist()],
+                    "volume_uplift_abs": round(float(evaluated["total_volume_uplift"]), 4),
+                    "volume_uplift_pct": round(float(evaluated["total_volume_uplift_pct"]), 4),
+                    "revenue_uplift_abs": round(float(evaluated["revenue_uplift_abs"]), 4),
+                    "revenue_uplift_pct": round(float(evaluated["revenue_uplift_pct"]), 4),
+                    "baseline_revenue": round(float(evaluated["baseline_revenue"]), 4),
+                    "new_revenue": round(float(evaluated["new_revenue"]), 4),
+                    "total_new_spend": round(float(evaluated["total_spend"]), 4),
+                    "weighted_tv_share": round(float(evaluated["weighted_tv_share"]), 6),
+                    "weighted_digital_share": round(float(evaluated["weighted_digital_share"]), 6),
+                    "markets": evaluated["rows"],
+                    "_vector_key": key,
+                }
+            )
+            local_scaled = np.vstack((local_scaled, scaled.reshape(1, -1)))
+            local_exact_keys.add(key)
+            if near_opt:
+                local_near_count += 1
+            return True
+
+        while len(local_accepted) < worker_target_count and local_near_count < near_target_count and local_attempts < SCENARIO_MAX_ATTEMPTS:
+            if timed_out():
+                worker_timeout_hit = True
+                break
+            local_attempts += 1
+            candidate = _sample_candidate_vector(seeds[fam], fam, True, bounds, regions, params, local_rng)
+            local_try_accept_candidate(candidate, seed_source=f"near_{fam}_seed", near_opt=True)
+
+        while len(local_accepted) < worker_target_count and local_attempts < SCENARIO_MAX_ATTEMPTS:
+            if timed_out():
+                worker_timeout_hit = True
+                break
+            local_attempts += 1
+            candidate = _sample_candidate_vector(seeds[fam], fam, False, bounds, regions, params, local_rng)
+            local_try_accept_candidate(candidate, seed_source=f"{fam}_strategy", near_opt=False)
+
+        if len(local_accepted) < target_count and not worker_timeout_hit:
+            original_min_distance = float(worker_min_distance)
+            for relaxed_min_distance in (
+                max(0.0, original_min_distance * 0.5),
+                max(0.0, original_min_distance * 0.25),
+                max(0.0, original_min_distance * 0.1),
+                0.0,
+            ):
+                relaxed_min_distance = float(round(relaxed_min_distance, 6))
+                if relaxed_min_distance >= worker_min_distance:
+                    continue
+                worker_min_distance = relaxed_min_distance
+                local_notes.append(
+                    f"{fam.capitalize()} family relaxed diversity threshold from {original_min_distance:.4f} to {relaxed_min_distance:.4f}."
+                )
+                local_try_accept_candidate(seeds[fam], seed_source=f"{fam}_seed_relaxed", near_opt=False, budget_target=seed_budget)
+                relax_attempts = 0
+                relax_max_attempts = max(1200, SCENARIO_MAX_ATTEMPTS // max(3, len(active_families)))
+                while len(local_accepted) < worker_target_count and relax_attempts < relax_max_attempts:
+                    if timed_out():
+                        worker_timeout_hit = True
+                        break
+                    relax_attempts += 1
+                    local_attempts += 1
+                    candidate = _sample_candidate_vector(seeds[fam], fam, False, bounds, regions, params, local_rng)
+                    local_try_accept_candidate(candidate, seed_source=f"{fam}_relaxed", near_opt=False)
+                if worker_timeout_hit or len(local_accepted) >= worker_target_count:
+                    break
+
+        return {
+            "family": fam,
+            "scenarios": local_accepted,
+            "near_count": local_near_count,
+            "attempts": local_attempts,
+            "timeout_hit": worker_timeout_hit,
+            "notes": local_notes,
         }
-        accepted.append(scenario)
-        accepted_vectors.append(projected)
-        accepted_scaled = np.vstack((accepted_scaled, scaled.reshape(1, -1)))
-        exact_keys.add(key)
-        if near_opt:
-            near_count += 1
-        return True
 
-    def timed_out() -> bool:
-        return (time.time() - started_at) >= runtime_limit
+    set_progress(32, f"Generating {len(active_families)} scenario families in parallel...")
+    family_batches: list[dict[str, Any]] = []
+    max_workers = max(1, min(len(active_families), 6))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(generate_family_batch, fam, family_targets.get(fam, 0), family_near_targets.get(fam, 0)): fam
+            for fam in active_families
+            if family_targets.get(fam, 0) > 0
+        }
+        completed_families = 0
+        for future in concurrent.futures.as_completed(future_map):
+            family_batches.append(future.result())
+            completed_families += 1
+            set_progress(
+                32 + int(min(28, 28 * completed_families / max(1, len(future_map)))),
+                f"Generating {len(active_families)} scenario families in parallel...",
+            )
 
-    set_progress(32, "Generating near-optimum scenarios...")
-    while len(accepted) < target_total and near_count < target_near and attempts < SCENARIO_MAX_ATTEMPTS:
-        if timed_out():
-            timeout_hit = True
-            break
-        attempts += 1
-        fam = "volume" if rng.random() < 0.5 else "revenue"
-        base = seeds[fam]
-        candidate = _sample_candidate_vector(base, fam, True, bounds, regions, params, rng)
-        try_accept_candidate(candidate, family=fam, seed_source=f"near_{fam}_seed", near_opt=True)
-        if attempts % 1200 == 0:
-            set_progress(32 + int(min(18, 18 * near_count / max(1, target_near))), "Generating near-optimum scenarios...")
+    family_batches.sort(key=lambda batch: active_families.index(batch["family"]))
+    merged_exact_keys: set[tuple[float, ...]] = set()
+    for batch in family_batches:
+        near_count += int(batch.get("near_count", 0) or 0)
+        attempts += int(batch.get("attempts", 0) or 0)
+        timeout_hit = timeout_hit or bool(batch.get("timeout_hit"))
+        notes.extend(list(batch.get("notes", []) or []))
+        for scenario in batch.get("scenarios", []):
+            key = tuple(scenario.get("_vector_key", ()))
+            if key in merged_exact_keys:
+                continue
+            merged_exact_keys.add(key)
+            accepted.append(scenario)
 
+    accepted = accepted[:target_total]
     if near_count < target_near:
         notes.append(f"Near-opt scenario target reduced by feasibility/diversity checks: {near_count} accepted out of requested {target_near}.")
-
-    set_progress(52, "Generating diverse strategy scenarios...")
-    family_weights = _normalize_family_weights(strategy.get("family_mix_weights"))
-    while len(accepted) < target_total and attempts < SCENARIO_MAX_ATTEMPTS:
-        if timed_out():
-            timeout_hit = True
-            break
-        attempts += 1
-        fam = _sample_family(family_weights, rng)
-        base = seeds[fam]
-        candidate = _sample_candidate_vector(base, fam, False, bounds, regions, params, rng)
-        try_accept_candidate(candidate, family=fam, seed_source=f"{fam}_strategy", near_opt=False)
-        if attempts % 2000 == 0:
-            span = max(1, target_total - target_near)
-            done = max(0, len(accepted) - near_count)
-            set_progress(52 + int(min(33, 33 * done / span)), "Generating diverse strategy scenarios...")
-
-    if len(accepted) < target_total and not timeout_hit:
-        original_min_distance = float(min_distance)
-        relaxation_levels = [
-            max(0.0, original_min_distance * 0.5),
-            max(0.0, original_min_distance * 0.25),
-            max(0.0, original_min_distance * 0.1),
-            0.0,
-        ]
-        seen_levels: set[float] = set()
-        for relaxed_min_distance in relaxation_levels:
-            relaxed_min_distance = float(round(relaxed_min_distance, 6))
-            if relaxed_min_distance in seen_levels:
-                continue
-            seen_levels.add(relaxed_min_distance)
-            if relaxed_min_distance >= min_distance:
-                continue
-            notes.append(
-                f"Feasible space is tight under current budget and constraints; relaxing diversity threshold from {min_distance:.4f} to {relaxed_min_distance:.4f}."
-            )
-            min_distance = relaxed_min_distance
-            for fam, seed in seeds.items():
-                try_accept_candidate(seed, family=fam, seed_source=f"{fam}_seed_relaxed", near_opt=False)
-            relax_attempts = 0
-            relax_max_attempts = max(2500, SCENARIO_MAX_ATTEMPTS // 3)
-            while len(accepted) < target_total and relax_attempts < relax_max_attempts:
-                if timed_out():
-                    timeout_hit = True
-                    break
-                relax_attempts += 1
-                fam = _sample_family(family_weights, rng)
-                base = seeds[fam]
-                candidate = _sample_candidate_vector(base, fam, False, bounds, regions, params, rng)
-                try_accept_candidate(candidate, family=fam, seed_source=f"{fam}_relaxed", near_opt=False)
-            if timeout_hit or len(accepted) >= target_total:
-                break
+    notes.append(f"Parallel family generation used {len(active_families)} Monte Carlo worker(s).")
 
     if len(accepted) < target_total:
         notes.append(
@@ -7778,6 +8072,11 @@ def _generate_scenarios_for_context(
         )
     if timeout_hit:
         notes.append(f"Generation stopped at runtime cap ({runtime_limit}s) to keep UI responsive.")
+
+    for idx, scenario in enumerate(accepted, start=1):
+        scenario["scenario_index"] = idx
+        scenario["scenario_id"] = f"SCN-{idx:04d}"
+        scenario.pop("_vector_key", None)
 
     _apply_balanced_scores(accepted)
     _rank_scenarios(accepted)
@@ -7852,6 +8151,9 @@ def _run_scenario_job(job_id: str, payload: ScenarioJobCreateRequest) -> None:
 
         _update_scenario_job(job_id, progress=22, message="Building deterministic generation biases...")
         strategy, strategy_notes = _build_generation_strategy_from_resolved_intent(resolved_intent, ctx)
+        if payload.strategy_override:
+            strategy = _merge_strategy_override(strategy, payload.strategy_override)
+            strategy_notes = [*strategy_notes, "Scenario strategy override was applied to bias family exploration toward the approved market plan."]
 
         def set_progress(progress: int, message: str) -> None:
             _update_scenario_job(job_id, progress=max(0, min(99, int(progress))), message=message)
@@ -7869,6 +8171,7 @@ def _run_scenario_job(job_id: str, payload: ScenarioJobCreateRequest) -> None:
             "summary": artifacts["summary"],
             "anchors": artifacts["anchors"],
             "resolved_intent": resolved_intent,
+            "strategy_used": strategy,
             "generation_notes": [*intent_notes, *strategy_notes, *artifacts["notes"]],
             "scenarios": scenarios,
         }
@@ -7907,6 +8210,9 @@ def _paginate_scenario_results(
     reach_share_market: str | None,
     reach_share_direction: str | None,
     min_reach_share_delta_pp: float | None,
+    reach_share_market_2: str | None,
+    reach_share_direction_2: str | None,
+    min_reach_share_delta_pp_2: float | None,
     target_budget: float | None,
 ) -> dict[str, Any]:
     allowed_sort = {
@@ -7947,12 +8253,25 @@ def _paginate_scenario_results(
             items = [s for s in items if _util_pct(s) >= float(min_budget_utilized_pct)]
         if max_budget_utilized_pct is not None:
             items = [s for s in items if _util_pct(s) <= float(max_budget_utilized_pct)]
-    if reach_share_market:
-        market_key = str(reach_share_market).strip().lower()
-        direction = str(reach_share_direction or "").strip().lower()
-        min_delta = abs(float(_finite(min_reach_share_delta_pp, 0.0)))
+    def _apply_reach_share_filter(
+        source_items: list[dict[str, Any]],
+        market: str | None,
+        direction_raw: str | None,
+        min_delta_raw: float | None,
+    ) -> list[dict[str, Any]]:
+        if not market:
+            return source_items
+        market_keys = [
+            part.strip().lower()
+            for part in str(market).split(",")
+            if str(part).strip()
+        ]
+        if not market_keys:
+            return source_items
+        direction = str(direction_raw or "").strip().lower()
+        min_delta = abs(float(_finite(min_delta_raw, 0.0)))
 
-        def _reach_share_delta_pp(s: dict[str, Any]) -> float | None:
+        def _reach_share_delta_pp(s: dict[str, Any], market_key: str) -> float | None:
             for row in s.get("markets", []) or []:
                 if str(row.get("market", "")).strip().lower() != market_key:
                     continue
@@ -7963,24 +8282,18 @@ def _paginate_scenario_results(
                 return None
             return None
 
-        if direction in {"higher", "increase", "inc", "up"}:
-            items = [
-                s
-                for s in items
-                if (lambda d: d is not None and d >= min_delta)(_reach_share_delta_pp(s))
-            ]
-        elif direction in {"lower", "decrease", "dec", "down"}:
-            items = [
-                s
-                for s in items
-                if (lambda d: d is not None and d <= -min_delta)(_reach_share_delta_pp(s))
-            ]
-        else:
-            items = [
-                s
-                for s in items
-                if (lambda d: d is not None and abs(d) >= min_delta)(_reach_share_delta_pp(s))
-            ]
+        def _matches(s: dict[str, Any], market_key: str) -> bool:
+            delta = _reach_share_delta_pp(s, market_key)
+            if direction in {"higher", "increase", "inc", "up"}:
+                return delta is not None and delta >= min_delta
+            if direction in {"lower", "decrease", "dec", "down"}:
+                return delta is not None and delta <= -min_delta
+            return delta is not None and abs(delta) >= min_delta
+
+        return [s for s in source_items if all(_matches(s, market_key) for market_key in market_keys)]
+
+    items = _apply_reach_share_filter(items, reach_share_market, reach_share_direction, min_reach_share_delta_pp)
+    items = _apply_reach_share_filter(items, reach_share_market_2, reach_share_direction_2, min_reach_share_delta_pp_2)
 
     reverse = sort_dir == "desc"
     if sort_key == "scenario_id":
@@ -8103,6 +8416,9 @@ def service_get_scenario_job_results(
     reach_share_market: str | None = None,
     reach_share_direction: str | None = None,
     min_reach_share_delta_pp: float | None = None,
+    reach_share_market_2: str | None = None,
+    reach_share_direction_2: str | None = None,
+    min_reach_share_delta_pp_2: float | None = None,
 ) -> Any:
     job = _read_scenario_job(job_id)
     status = str(job.get("status", "queued"))
@@ -8158,6 +8474,9 @@ def service_get_scenario_job_results(
         reach_share_market=reach_share_market,
         reach_share_direction=reach_share_direction,
         min_reach_share_delta_pp=min_reach_share_delta_pp,
+        reach_share_market_2=reach_share_market_2,
+        reach_share_direction_2=reach_share_direction_2,
+        min_reach_share_delta_pp_2=min_reach_share_delta_pp_2,
         target_budget=float((result.get("summary") or {}).get("target_budget", 0.0)),
     )
     return {

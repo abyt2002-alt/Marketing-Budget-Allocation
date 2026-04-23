@@ -850,9 +850,9 @@ const API_BASE_URL = (() => {
   }
   if (typeof window !== 'undefined' && window.location.hostname) {
     const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
-    return `${protocol}//${window.location.hostname}:8020`
+    return `${protocol}//${window.location.hostname}:8022`
   }
-  return 'http://127.0.0.1:8020'
+  return 'http://127.0.0.1:8022'
 })()
 const normalizeBrandKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, '')
 const SCENARIO_PROGRESS_STAGES = [
