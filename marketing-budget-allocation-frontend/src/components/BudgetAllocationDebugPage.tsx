@@ -1932,27 +1932,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
           {/* ONE results panel — all stages inside */}
           {(phase === 'revealing' || phase === 'done') && interp && (
             <div className="budget-panel overflow-hidden">
-
-              {/* Clickable header — always visible */}
-              <button
-                type="button"
-                onClick={() => setResultsCollapsed(prev => !prev)}
-                className="flex w-full items-start justify-between px-5 py-4 text-left"
-              >
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">Trinity Analysis</p>
-                  <p className="mt-1 text-sm font-medium text-slate-800 leading-5">{interp.goal || prompt}</p>
-                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                    {scenarioResults && <span className="text-xs text-slate-400">{scenarioResults.summary.scenario_count.toLocaleString()} scenarios ready</span>}
-                  </div>
-                </div>
-                <span className="shrink-0 ml-3 rounded-full border border-[#d7cbb7] bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600">
-                  {resultsCollapsed ? 'Expand ▼' : 'Collapse ▲'}
-                </span>
-              </button>
-
-              {!resultsCollapsed && (
-              <div className="divide-y divide-slate-100 border-t border-slate-100">
+              <div className="divide-y divide-slate-100">
 
 
               {/* Sections: QA + Monte Carlo */}
@@ -2651,7 +2631,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
               )}
 
               </div>
-              )}
             </div>
           )}
 
