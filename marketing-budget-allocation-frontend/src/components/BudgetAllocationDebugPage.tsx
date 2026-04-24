@@ -255,7 +255,7 @@ type ScenarioItem = {
 
 type ScenarioReachFilter = {
   markets: string[]
-  direction: 'higher' | 'lower'
+  direction: 'higher' | 'lower' | 'equal'
 }
 
 type SavedScenarioPlan = {
@@ -444,6 +444,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [savedScenarioPlans, setSavedScenarioPlans] = useState<SavedScenarioPlan[]>([])
   const [savedPlansOpen, setSavedPlansOpen] = useState(false)
   const [openReachFilterIndex, setOpenReachFilterIndex] = useState<number | null>(null)
+  const [marketControlOpen, setMarketControlOpen] = useState(false)
   const [zoomAnchor, setZoomAnchor] = useState<ScenarioItem | null>(null)
   const [zoomBandPct, setZoomBandPct] = useState(5)
   const [zoomPrompt, setZoomPrompt] = useState('')
@@ -763,6 +764,134 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   function setZoomReachFilter(index: number, patch: Partial<ScenarioReachFilter>) {
     setZoomReachFilters((prev) => prev.map((item, itemIndex) => (itemIndex === index ? { ...item, ...patch } : item)))
     setZoomPage(1)
+  }
+
+  function renderMarketControlPanel(
+    filters: ScenarioReachFilter[],
+    setter: (index: number, patch: Partial<ScenarioReachFilter>) => void,
+    availableMarkets: string[],
+    panelKey: string,
+  ) {
+    const activeCount = filters.filter(f => f.markets.length > 0).length
+    const directionLabel = (d: ScenarioReachFilter['direction']) =>
+      d === 'higher' ? 'Gained more share' : d === 'lower' ? 'Lost share' : 'Held share'
+    const directionColor = (d: ScenarioReachFilter['direction']) =>
+      d === 'higher' ? 'text-emerald-700 bg-emerald-50 border-emerald-200'
+      : d === 'lower' ? 'text-rose-700 bg-rose-50 border-rose-200'
+      : 'text-slate-600 bg-slate-50 border-slate-200'
+
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-white">
+        <button
+          type="button"
+          onClick={() => setMarketControlOpen(prev => !prev)}
+          className="flex w-full items-center justify-between px-4 py-3 text-left"
+        >
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-600">Market Change Control</span>
+            {activeCount > 0 && (
+              <span className="rounded-full bg-[#f4ece0] px-2 py-0.5 text-[10px] font-semibold text-[#7b5c33]">
+                {activeCount} condition{activeCount !== 1 ? 's' : ''} active
+              </span>
+            )}
+          </div>
+          <span className="text-xs font-semibold text-slate-400">{marketControlOpen ? 'Hide ▲' : 'Show ▼'}</span>
+        </button>
+
+        {marketControlOpen && (
+          <div className="border-t border-slate-100 px-4 pb-4 pt-3">
+            <p className="mb-3 text-xs text-slate-500">Filter scenarios to only show ones where selected markets moved in a specific direction vs last year.</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {filters.map((filter, index) => {
+                const otherFilter = filters[index === 0 ? 1 : 0]
+                const dropdownKey = `${panelKey}-${index}`
+                const isOpen = openReachFilterIndex === (panelKey === 'main' ? index : index + 10)
+                const dropdownIndex = panelKey === 'main' ? index : index + 10
+                const available = availableMarkets.filter(m => !otherFilter.markets.includes(m))
+                return (
+                  <div key={dropdownKey} className="relative rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-500">Condition {index + 1}</span>
+                      {filter.markets.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setter(index, { markets: [] })}
+                          className="text-[10px] font-semibold text-slate-400 hover:text-rose-500"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Market picker */}
+                    <button
+                      type="button"
+                      onClick={() => setOpenReachFilterIndex(prev => prev === dropdownIndex ? null : dropdownIndex)}
+                      className="flex w-full items-center justify-between rounded-xl border border-slate-300 bg-white px-3 py-2 text-left text-sm text-slate-700 transition hover:border-[#9c7a4a]"
+                    >
+                      <span className="truncate pr-2 text-sm">
+                        {filter.markets.length > 0 ? filter.markets.join(', ') : 'Select markets'}
+                      </span>
+                      <span className="text-xs text-slate-400">{isOpen ? '▲' : '▼'}</span>
+                    </button>
+
+                    {isOpen && (
+                      <div className="absolute left-0 right-0 top-[7.5rem] z-30 mx-3 rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
+                        <div className="max-h-48 space-y-1 overflow-y-auto pr-1">
+                          {available.map((market) => {
+                            const selected = filter.markets.includes(market)
+                            return (
+                              <label
+                                key={`${dropdownKey}-${market}`}
+                                className={`flex cursor-pointer items-center gap-3 rounded-lg px-3 py-1.5 text-sm transition ${selected ? 'bg-[#f4ece0] text-[#7b5c33]' : 'hover:bg-slate-50 text-slate-700'}`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={selected}
+                                  onChange={(e) => {
+                                    const next = e.target.checked ? [...filter.markets, market] : filter.markets.filter(m => m !== market)
+                                    setter(index, { markets: next })
+                                  }}
+                                  className="h-4 w-4 rounded border-slate-300 text-[#7b5c33] focus:ring-[#c9b79b]"
+                                />
+                                <span className="flex-1">{market}</span>
+                              </label>
+                            )
+                          })}
+                        </div>
+                        <div className="mt-2 flex justify-end border-t border-slate-100 pt-2">
+                          <button type="button" onClick={() => setOpenReachFilterIndex(null)}
+                            className="rounded-full bg-[#7b5c33] px-3 py-1 text-xs font-semibold text-white hover:bg-[#6c4f2a]">
+                            Done
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Direction pills */}
+                    <div className="mt-2 flex gap-2">
+                      {(['higher', 'lower', 'equal'] as const).map(dir => (
+                        <button
+                          key={dir}
+                          type="button"
+                          disabled={!filter.markets.length}
+                          onClick={() => setter(index, { direction: dir })}
+                          className={`flex-1 rounded-full border px-2 py-1.5 text-[11px] font-semibold transition disabled:opacity-40 ${
+                            filter.direction === dir ? directionColor(dir) : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
+                          }`}
+                        >
+                          {directionLabel(dir)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    )
   }
 
   async function startScenarioGeneration() {
@@ -2339,7 +2468,15 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                               className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
                               placeholder="e.g. 100" />
                           </div>
-                          {scenarioReachFilters.map((filter, index) => (
+                          <div className="lg:col-span-12">
+                            {renderMarketControlPanel(
+                              scenarioReachFilters,
+                              setScenarioReachFilter,
+                              scenarioResults?.summary.selected_markets ?? markets,
+                              'main',
+                            )}
+                          </div>
+                          {false && scenarioReachFilters.map((filter, index) => (
                             <div key={`reach-filter-${index}`} className="relative rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 lg:col-span-6">
                               <div className="flex items-center justify-between gap-2">
                                 <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
@@ -2407,7 +2544,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                               ) : null}
                               <select
                                 value={filter.direction}
-                                onChange={(e) => setScenarioReachFilter(index, { direction: e.target.value as 'higher' | 'lower' })}
+                                onChange={(e) => setScenarioReachFilter(index, { direction: e.target.value as 'higher' | 'lower' | 'equal' })}
                                 disabled={!filter.markets.length}
                                 className="mt-3 w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm disabled:bg-slate-100 disabled:text-slate-400"
                               >
@@ -2648,7 +2785,15 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                         className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
                         placeholder="e.g. 100" />
                     </div>
-                    {scenarioReachFilters.map((filter, index) => {
+                    <div className="lg:col-span-12">
+                      {renderMarketControlPanel(
+                        scenarioReachFilters,
+                        setScenarioReachFilter,
+                        scenarioResults?.summary.selected_markets ?? markets,
+                        'main2',
+                      )}
+                    </div>
+                    {false && scenarioReachFilters.map((filter, index) => {
                       const otherFilter = scenarioReachFilters[index === 0 ? 1 : 0]
                       const availableMarkets = (scenarioResults?.summary.selected_markets ?? markets).filter(
                         (m) => !otherFilter.markets.includes(m)
@@ -2721,7 +2866,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                         ) : null}
                         <select
                           value={filter.direction}
-                          onChange={(e) => setScenarioReachFilter(index, { direction: e.target.value as 'higher' | 'lower' })}
+                          onChange={(e) => setScenarioReachFilter(index, { direction: e.target.value as 'higher' | 'lower' | 'equal' })}
                           disabled={!filter.markets.length}
                           className="mt-3 w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm disabled:bg-slate-100 disabled:text-slate-400"
                         >
@@ -3170,7 +3315,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                             ) : null}
                             <select
                               value={filter.direction}
-                              onChange={(e) => setZoomReachFilter(index, { direction: e.target.value as 'higher' | 'lower' })}
+                              onChange={(e) => setZoomReachFilter(index, { direction: e.target.value as 'higher' | 'lower' | 'equal' })}
                               disabled={!filter.markets.length}
                               className="mt-3 w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm disabled:bg-slate-100 disabled:text-slate-400"
                             >
