@@ -10,7 +10,6 @@ import {
   Download,
   LoaderCircle,
   Sparkles,
-  Target,
   TrendingUp,
   WalletCards,
   X,
@@ -385,6 +384,14 @@ type ScenarioMarketFlowRow = {
   old_digital_split_pct: number
   new_digital_split_pct: number
   digital_split_change_pct: number
+  old_tv_spend_mn: number
+  new_tv_spend_mn: number
+  tv_spend_delta_mn: number
+  old_digital_spend_mn: number
+  new_digital_spend_mn: number
+  digital_spend_delta_mn: number
+  old_tv_spend_share_pct: number
+  new_tv_spend_share_pct: number
 }
 
 type ScenarioResultsResponse = {
@@ -798,7 +805,7 @@ type AIInsightsSummaryResponse = {
 }
 
 type AppSnapshotPayload = {
-  activeMainTab: 's_curves' | 'driver_analysis' | 'budget_allocation' | 'budget_allocation_2'
+  activeMainTab: 's_curves' | 'driver_analysis' | 'budget_allocation'
   selectedBrand: string
   selectedMarkets: string[]
   budgetType: 'percentage' | 'absolute'
@@ -899,7 +906,7 @@ function App() {
   const [step1AllocationDraft, setStep1AllocationDraft] = useState<Record<string, string>>({})
   const [constraintsPreview, setConstraintsPreview] = useState<OptimizeAutoResponse | null>(null)
   const [marketOverrides, setMarketOverrides] = useState<Record<string, MarketOverride>>({})
-  const [activeMainTab, setActiveMainTab] = useState<'s_curves' | 'driver_analysis' | 'budget_allocation' | 'budget_allocation_2'>('s_curves')
+  const [activeMainTab, setActiveMainTab] = useState<'s_curves' | 'driver_analysis' | 'budget_allocation'>('s_curves')
   const [step2Enabled, setStep2Enabled] = useState(true)
   const [step2SetupCollapsed, setStep2SetupCollapsed] = useState(false)
   const [step1Collapsed, setStep1Collapsed] = useState(false)
@@ -1526,12 +1533,8 @@ function App() {
     if (activeMainTab !== 'driver_analysis') {
       return
     }
-    if (loadingConfig || !selectedBrand || !activeSCurveState) {
-      setDriverAnalysisData(null)
-      return
-    }
-    void loadDriverAnalysis()
-  }, [activeMainTab, loadingConfig, selectedBrand, activeSCurveState, driverMonthsBack])
+    setActiveMainTab('budget_allocation')
+  }, [activeMainTab])
 
   function toggleMarket(market: string) {
     setSelectedMarkets((prev) =>
@@ -2479,6 +2482,17 @@ function App() {
       const newTvPct = Number(row.tv_split ?? 0) * 100
       const oldDigitalPct = Number(row.fy25_digital_share ?? row.digital_split ?? 0) * 100
       const newDigitalPct = Number(row.digital_split ?? 0) * 100
+
+      // TV and Digital spend before/after
+      const oldTvSpend = (Number(row.fy25_tv_reach ?? 0)) * (Number(row.tv_cpr ?? 0))
+      const oldDigitalSpend = (Number(row.fy25_digital_reach ?? 0)) * (Number(row.digital_cpr ?? 0))
+      const newTvSpend = Number(row.new_total_tv_spend ?? 0)
+      const newDigitalSpend = Number(row.new_total_digital_spend ?? 0)
+      const oldTotalSpendForShare = oldTvSpend + oldDigitalSpend
+      const newTotalSpendForShare = newTvSpend + newDigitalSpend
+      const oldTvSpendSharePct = oldTotalSpendForShare > 0 ? (oldTvSpend / oldTotalSpendForShare) * 100 : 0
+      const newTvSpendSharePct = newTotalSpendForShare > 0 ? (newTvSpend / newTotalSpendForShare) * 100 : 0
+
       return {
         market: row.market,
         old_budget_share_pct: oldBudgetSharePct,
@@ -2494,6 +2508,14 @@ function App() {
         old_digital_split_pct: oldDigitalPct,
         new_digital_split_pct: newDigitalPct,
         digital_split_change_pct: newDigitalPct - oldDigitalPct,
+        old_tv_spend_mn: oldTvSpend / 1_000_000,
+        new_tv_spend_mn: newTvSpend / 1_000_000,
+        tv_spend_delta_mn: (newTvSpend - oldTvSpend) / 1_000_000,
+        old_digital_spend_mn: oldDigitalSpend / 1_000_000,
+        new_digital_spend_mn: newDigitalSpend / 1_000_000,
+        digital_spend_delta_mn: (newDigitalSpend - oldDigitalSpend) / 1_000_000,
+        old_tv_spend_share_pct: oldTvSpendSharePct,
+        new_tv_spend_share_pct: newTvSpendSharePct,
       }
     })
     const sorter: (a: ScenarioMarketFlowRow, b: ScenarioMarketFlowRow) => number =
@@ -4924,6 +4946,7 @@ function App() {
             </div>
 
             <div className="space-y-3 p-5">
+              {/* Row 1: market-level summary */}
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Reach Share</p>
@@ -4944,31 +4967,70 @@ function App() {
                   </p>
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Spend Shift</p>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Total Spend Shift</p>
                   <p className={`mt-2 text-lg font-bold ${deltaClass(row.spend_delta_mn)}`}>
                     {formatSignedCurrencyMn(row.spend_delta_mn)}
                   </p>
                 </div>
               </div>
 
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-xl border border-slate-200 bg-white p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">TV Split</p>
-                  <p className="mt-1 text-sm text-slate-700">
-                    {formatPct(row.old_tv_split_pct, 2)} {'->'} {formatPct(row.new_tv_split_pct, 2)}
-                  </p>
-                  <p className={`mt-1 text-sm font-semibold ${deltaClass(row.tv_split_change_pct)}`}>
-                    {formatSignedPct(row.tv_split_change_pct, 2)}
-                  </p>
-                </div>
-                <div className="rounded-xl border border-slate-200 bg-white p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Digital Split</p>
-                  <p className="mt-1 text-sm text-slate-700">
-                    {formatPct(row.old_digital_split_pct, 2)} {'->'} {formatPct(row.new_digital_split_pct, 2)}
-                  </p>
-                  <p className={`mt-1 text-sm font-semibold ${deltaClass(row.digital_split_change_pct)}`}>
-                    {formatSignedPct(row.digital_split_change_pct, 2)}
-                  </p>
+              {/* Row 2: TV vs Digital spend — before and after */}
+              <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-blue-700">TV vs Digital Budget Split</p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {/* TV */}
+                  <div className="rounded-lg border border-blue-200 bg-white p-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">TV</p>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${row.tv_spend_delta_mn >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                        {formatSignedCurrencyMn(row.tv_spend_delta_mn)}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex items-end gap-2">
+                      <div className="flex-1 text-center">
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Before</p>
+                        <p className="text-base font-bold text-slate-700">{formatCurrencyMn(row.old_tv_spend_mn * 1_000_000)}</p>
+                        <p className="text-[10px] text-slate-500">{formatPct(row.old_tv_spend_share_pct, 1)} of market</p>
+                      </div>
+                      <p className="mb-1 text-slate-400">→</p>
+                      <div className="flex-1 text-center">
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">After</p>
+                        <p className={`text-base font-bold ${deltaClass(row.tv_spend_delta_mn)}`}>{formatCurrencyMn(row.new_tv_spend_mn * 1_000_000)}</p>
+                        <p className="text-[10px] text-slate-500">{formatPct(row.new_tv_spend_share_pct, 1)} of market</p>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-[10px] text-slate-500">
+                      Reach mix: {formatPct(row.old_tv_split_pct, 1)} → {formatPct(row.new_tv_split_pct, 1)}
+                      <span className={`ml-1 font-semibold ${deltaClass(row.tv_split_change_pct)}`}>({formatSignedPct(row.tv_split_change_pct, 1)})</span>
+                    </div>
+                  </div>
+
+                  {/* Digital */}
+                  <div className="rounded-lg border border-purple-200 bg-white p-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-purple-600">Digital</p>
+                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${row.digital_spend_delta_mn >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                        {formatSignedCurrencyMn(row.digital_spend_delta_mn)}
+                      </span>
+                    </div>
+                    <div className="mt-2 flex items-end gap-2">
+                      <div className="flex-1 text-center">
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Before</p>
+                        <p className="text-base font-bold text-slate-700">{formatCurrencyMn(row.old_digital_spend_mn * 1_000_000)}</p>
+                        <p className="text-[10px] text-slate-500">{formatPct(100 - row.old_tv_spend_share_pct, 1)} of market</p>
+                      </div>
+                      <p className="mb-1 text-slate-400">→</p>
+                      <div className="flex-1 text-center">
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">After</p>
+                        <p className={`text-base font-bold ${deltaClass(row.digital_spend_delta_mn)}`}>{formatCurrencyMn(row.new_digital_spend_mn * 1_000_000)}</p>
+                        <p className="text-[10px] text-slate-500">{formatPct(100 - row.new_tv_spend_share_pct, 1)} of market</p>
+                      </div>
+                    </div>
+                    <div className="mt-2 text-[10px] text-slate-500">
+                      Reach mix: {formatPct(row.old_digital_split_pct, 1)} → {formatPct(row.new_digital_split_pct, 1)}
+                      <span className={`ml-1 font-semibold ${deltaClass(row.digital_split_change_pct)}`}>({formatSignedPct(row.digital_split_change_pct, 1)})</span>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -5014,18 +5076,6 @@ function App() {
           </button>
           <button
             type="button"
-            onClick={() => setActiveMainTab('driver_analysis')}
-            className={`mt-2 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold ${
-              activeMainTab === 'driver_analysis'
-                ? 'border border-primary/30 bg-primary/10 text-primary'
-                : 'border border-slate-200 bg-white text-slate-700'
-            }`}
-          >
-            <Activity className="h-4 w-4" />
-            Driver Analysis
-          </button>
-          <button
-            type="button"
             onClick={() => setActiveMainTab('budget_allocation')}
             className={`mt-2 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold ${
               activeMainTab === 'budget_allocation'
@@ -5033,56 +5083,32 @@ function App() {
                 : 'border border-slate-200 bg-white text-slate-700'
             }`}
           >
-            <Target className="h-4 w-4" />
-            Budget Allocation
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveMainTab('budget_allocation_2')}
-            className={`mt-2 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold ${
-              activeMainTab === 'budget_allocation_2'
-                ? 'border border-primary/30 bg-primary/10 text-primary'
-                : 'border border-slate-200 bg-white text-slate-700'
-            }`}
-          >
             <Bot className="h-4 w-4" />
-            Budget Allocation 2.0
+            Budget Allocation
           </button>
         </aside>
 
         <main className="flex-1 overflow-y-auto p-4 sm:p-5 lg:p-6">
-          {activeMainTab === 's_curves' ? (
-            <div className="w-full space-y-5">
-              {renderSCurvesSection()}
-              <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-panel">
-                <p className="text-sm text-slate-600">Use these response curves as pre-read, then move to driver decomposition before optimization.</p>
-                <button
-                  type="button"
-                  onClick={() => setActiveMainTab('driver_analysis')}
-                  className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
-                >
-                  Go To Driver Analysis
-                </button>
-              </section>
-            </div>
-          ) : activeMainTab === 'driver_analysis' ? (
-            <div className="w-full space-y-5">
-              {renderDriverAnalysisSection()}
-              <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-panel">
-                <p className="text-sm text-slate-600">Review the month-level driver movements, then continue to budget optimization.</p>
-                <button
-                  type="button"
-                  onClick={() => setActiveMainTab('budget_allocation')}
-                  className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
-                >
-                  Go To Budget Allocation
-                </button>
-              </section>
-            </div>
-          ) : activeMainTab === 'budget_allocation_2' ? (
+          <div className={activeMainTab === 's_curves' ? 'w-full space-y-5' : 'hidden'} aria-hidden={activeMainTab !== 's_curves'}>
+            {renderSCurvesSection()}
+            <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-panel">
+              <p className="text-sm text-slate-600">Use these response curves as pre-read, then continue to budget allocation.</p>
+              <button
+                type="button"
+                onClick={() => setActiveMainTab('budget_allocation')}
+                className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700"
+              >
+                Go To Budget Allocation
+              </button>
+            </section>
+          </div>
+
+          <div className={activeMainTab === 'budget_allocation' ? 'w-full' : 'hidden'} aria-hidden={activeMainTab !== 'budget_allocation'}>
             <BudgetAllocationDebugPage apiBaseUrl={API_BASE_URL} config={config} />
-          ) : (
-            <div className="w-full space-y-6">
+          </div>
+
+          <div className="hidden w-full space-y-6" aria-hidden="true">
+            {renderDriverAnalysisSection()}
             <section className="hidden rounded-xl border border-slate-200 bg-white p-4 shadow-panel" aria-hidden="true">
               <div className="mb-2 flex items-start justify-between gap-3">
                 <div>
@@ -5974,7 +6000,6 @@ function App() {
               )
             ) : null}
             </div>
-          )}
         </main>
       </div>
       {notice ? (
