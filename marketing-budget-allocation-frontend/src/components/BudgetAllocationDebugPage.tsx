@@ -229,6 +229,18 @@ type ScenarioMarketRow = {
   pct_change_total_spend?: number
   revenue_uplift_pct?: number
   uplift_pct?: number
+  new_total_tv_spend?: number
+  new_total_digital_spend?: number
+  fy25_tv_reach?: number
+  fy25_digital_reach?: number
+  new_annual_tv_reach?: number
+  new_annual_digital_reach?: number
+  tv_cpr?: number
+  digital_cpr?: number
+  tv_split?: number
+  digital_split?: number
+  fy25_tv_share?: number
+  fy25_digital_share?: number
 }
 
 type ScenarioItem = {
@@ -245,7 +257,27 @@ type ScenarioItem = {
 
 type ScenarioReachFilter = {
   markets: string[]
-  direction: 'higher' | 'lower'
+  direction: 'higher' | 'lower' | 'equal'
+}
+
+type ModalSCurvePoint = {
+  scale: number
+  pct_change_input: number
+  predicted_volume: number
+  predicted_spend: number
+  tv_reach?: number
+  digital_reach?: number
+}
+
+type ModalSCurveData = {
+  tv: ModalSCurvePoint[]
+  digital: ModalSCurvePoint[]
+  baseline_tv_reach?: number
+  baseline_digital_reach?: number
+  tv_min_reach?: number
+  tv_max_reach?: number
+  digital_min_reach?: number
+  digital_max_reach?: number
 }
 
 type SavedScenarioPlan = {
@@ -415,24 +447,59 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [scenarioReachFilters, setScenarioReachFilters] = useState<ScenarioReachFilter[]>([
     { markets: [], direction: 'higher' },
     { markets: [], direction: 'lower' },
+    { markets: [], direction: 'equal' },
   ])
   const [resultsCollapsed, setResultsCollapsed] = useState(false)
   const [, setQaFeedbackText] = useState('')
   const [qaSectionCollapsed, setQaSectionCollapsed] = useState(false)
   const [expandedQaCards, setExpandedQaCards] = useState<Record<string, boolean>>({})
+  const [qaActionExpanded, setQaActionExpanded] = useState<Record<string, boolean>>({})
   const [qaActionSelections, setQaActionSelections] = useState<Record<string, string>>({})
   const [qaSaveMessage, setQaSaveMessage] = useState('')
   const [scenarioModal, setScenarioModal] = useState<ScenarioItem | null>(null)
   const [scenarioModalSplitView, setScenarioModalSplitView] = useState<'reach' | 'spend'>('reach')
   const [scenarioModalSortBy, setScenarioModalSortBy] = useState<'budget_delta' | 'brand_salience' | 'market_share_change'>('budget_delta')
   const [scenarioModalChangeFilter, setScenarioModalChangeFilter] = useState<'all' | 'increase' | 'decrease'>('all')
+  const [scenarioMarketDetailRow, setScenarioMarketDetailRow] = useState<(ScenarioMarketRow & { deltaBudget: number }) | null>(null)
+  const [modalSCurveChannel, setModalSCurveChannel] = useState<'tv' | 'digital' | null>(null)
+  const [modalSCurveData, setModalSCurveData] = useState<ModalSCurveData | null>(null)
+  const [modalSCurveMarket, setModalSCurveMarket] = useState<string | null>(null)
+  const [modalSCurveLoading, setModalSCurveLoading] = useState(false)
+  const [modalSCurveError, setModalSCurveError] = useState('')
+  const [scoringGridCollapsed, setScoringGridCollapsed] = useState(true)
+  const [stepsCollapsed, setStepsCollapsed] = useState(true)
   const [scenarioPlanMessage, setScenarioPlanMessage] = useState('')
   const [savedScenarioPlans, setSavedScenarioPlans] = useState<SavedScenarioPlan[]>([])
   const [savedPlansOpen, setSavedPlansOpen] = useState(false)
   const [openReachFilterIndex, setOpenReachFilterIndex] = useState<number | null>(null)
+  const [marketControlOpen, setMarketControlOpen] = useState(false)
+  const [zoomAnchor, setZoomAnchor] = useState<ScenarioItem | null>(null)
+  const [zoomBandPct, setZoomBandPct] = useState(5)
+  const [zoomPrompt, setZoomPrompt] = useState('')
+  const [zoomLoading, setZoomLoading] = useState(false)
+  const [zoomJobId, setZoomJobId] = useState('')
+  const [zoomStatus, setZoomStatus] = useState<'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'expired'>('idle')
+  const [zoomProgress, setZoomProgress] = useState(0)
+  const [zoomMessage, setZoomMessage] = useState('')
+  const [zoomResults, setZoomResults] = useState<ScenarioResultsResponse | null>(null)
+  const [zoomError, setZoomError] = useState('')
+  const [zoomPage, setZoomPage] = useState(1)
+  const [zoomSortKey, setZoomSortKey] = useState('balanced_score')
+  const [zoomSortDir] = useState<'asc' | 'desc'>('desc')
+  const [zoomMinVolumePct, setZoomMinVolumePct] = useState('')
+  const [zoomMinRevenuePct, setZoomMinRevenuePct] = useState('')
+  const [zoomMaxBudgetUtilizedPctFilter, setZoomMaxBudgetUtilizedPctFilter] = useState('')
+  const [zoomReachFilters, setZoomReachFilters] = useState<ScenarioReachFilter[]>([
+    { markets: [], direction: 'higher' },
+    { markets: [], direction: 'lower' },
+    { markets: [], direction: 'equal' },
+  ])
+  const [openZoomReachFilterIndex, setOpenZoomReachFilterIndex] = useState<number | null>(null)
   const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savedPlansRef = useRef<HTMLDivElement | null>(null)
   const reachFiltersRef = useRef<HTMLDivElement | null>(null)
+  const zoomReachFiltersRef = useRef<HTMLDivElement | null>(null)
+  const zoomPanelRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     if (!config) return
@@ -465,11 +532,14 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       if (openReachFilterIndex !== null && reachFiltersRef.current && !reachFiltersRef.current.contains(target)) {
         setOpenReachFilterIndex(null)
       }
+      if (openZoomReachFilterIndex !== null && zoomReachFiltersRef.current && !zoomReachFiltersRef.current.contains(target)) {
+        setOpenZoomReachFilterIndex(null)
+      }
     }
 
     document.addEventListener('mousedown', handlePointerDown)
     return () => document.removeEventListener('mousedown', handlePointerDown)
-  }, [savedPlansOpen, openReachFilterIndex])
+  }, [savedPlansOpen, openReachFilterIndex, openZoomReachFilterIndex])
 
   useEffect(() => {
     setScenarioHandoff(null)
@@ -515,6 +585,44 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     void fetchScenarioResults(scenarioJobId, scenarioPage)
   }, [scenarioJobId, scenarioStatus, scenarioPage, scenarioSortKey, scenarioSortDir, scenarioMinVolumePct, scenarioMinRevenuePct, scenarioMaxBudgetUtilizedPctFilter, scenarioReachFilters])
 
+  useEffect(() => {
+    if (!zoomJobId) return
+    if (!(zoomStatus === 'queued' || zoomStatus === 'running')) return
+    const interval = window.setInterval(async () => {
+      try {
+        const response = await axios.get<ScenarioJobStatusResponse>(`${apiBaseUrl}/api/scenarios/jobs/${zoomJobId}`)
+        setZoomStatus(response.data.status)
+        setZoomProgress(response.data.progress ?? 0)
+        setZoomMessage(response.data.message ?? '')
+        if (response.data.status === 'completed') {
+          window.clearInterval(interval)
+          await fetchZoomResults(zoomJobId, 1)
+        } else if (response.data.status === 'failed' || response.data.status === 'expired') {
+          window.clearInterval(interval)
+          setZoomError(response.data.error_reason ?? 'Zoom generation failed.')
+          setZoomLoading(false)
+        }
+      } catch (err) {
+        window.clearInterval(interval)
+        setZoomError(axios.isAxiosError(err) ? (err.response?.data?.detail ?? 'Unable to fetch zoom job status.') : 'Unable to fetch zoom job status.')
+        setZoomLoading(false)
+      }
+    }, 2500)
+    return () => window.clearInterval(interval)
+  }, [apiBaseUrl, zoomJobId, zoomStatus])
+
+  useEffect(() => {
+    if (!zoomJobId || zoomStatus !== 'completed') return
+    void fetchZoomResults(zoomJobId, zoomPage)
+  }, [zoomJobId, zoomStatus, zoomPage, zoomSortKey, zoomSortDir, zoomMinVolumePct, zoomMinRevenuePct, zoomMaxBudgetUtilizedPctFilter, zoomReachFilters])
+
+  useEffect(() => {
+    if (!zoomAnchor || !zoomPanelRef.current) return
+    window.setTimeout(() => {
+      zoomPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }, 80)
+  }, [zoomAnchor])
+
   const availableMarkets = useMemo(
     () => (brand && config ? config.markets_by_brand[brand] ?? [] : []),
     [config, brand],
@@ -537,8 +645,8 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     if (!brand) { setError('Select a brand first.'); return }
     if (revealTimer.current) clearTimeout(revealTimer.current)
     setError('')
-    setHitlMode('review')
     if (mode === 'initial') {
+      setHitlMode('review')
       setResult(null)
       setPhase('loading')
       setLoading(true)
@@ -577,8 +685,39 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       const steps = res.data.normalized_interpretation?.steps ?? []
       startReveal(steps)
       setSetupCollapsed(true)
+      setStepsCollapsed(true)
+      // Auto-approve: skip "Does this look right?" and go straight to QA
+      const freshInterp = res.data.normalized_interpretation
+      if (freshInterp && brand) {
+        setHitlMode('approved')
+        setApprovalLoading(true)
+        setApprovalEvaluation(null)
+        setApprovalError('')
+        setScenarioHandoff(null)
+        setScenarioHandoffError('')
+        try {
+          const evalRes = await axios.post<ApprovedPlanEvaluationResponse>(`${apiBaseUrl}/api/scenarios/intent/evaluate-approved`, {
+            selected_brand: brand,
+            selected_markets: markets,
+            budget_increase_type: 'percentage',
+            budget_increase_value: budgetIncreasePct,
+            market_overrides: {},
+            intent_prompt: prompt,
+            approved_interpretation: freshInterp,
+          })
+          setApprovalEvaluation(evalRes.data)
+          await prepareScenarioHandoff(freshInterp)
+        } catch {
+          setApprovalError('Failed to evaluate the approved plan.')
+        } finally {
+          setApprovalLoading(false)
+        }
+      } else {
+        setHitlMode('review')
+      }
     } catch (err) {
       setPhase('idle')
+      setHitlMode('review')
       setError(axios.isAxiosError(err) ? (err.response?.data?.detail ?? 'Failed.') : 'Unexpected error.')
     } finally {
       setLoading(false)
@@ -621,8 +760,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     if (scenarioMinVolumePct.trim() !== '') params.min_volume_uplift_pct = Number(scenarioMinVolumePct)
     if (scenarioMinRevenuePct.trim() !== '') params.min_revenue_uplift_pct = Number(scenarioMinRevenuePct)
     if (scenarioMaxBudgetUtilizedPctFilter.trim() !== '') params.max_budget_utilized_pct = Number(scenarioMaxBudgetUtilizedPctFilter)
-    scenarioReachFilters.slice(0, 2).forEach((filter, index) => {
-      if (!filter.markets.length) return
+    scenarioReachFilters.filter(f => f.markets.length > 0).slice(0, 2).forEach((filter, index) => {
       const suffix = index === 0 ? '' : '_2'
       params[`reach_share_market${suffix}`] = filter.markets.join(',')
       params[`reach_share_direction${suffix}`] = filter.direction
@@ -651,6 +789,175 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     setScenarioPage(1)
   }
 
+  function setZoomReachFilter(index: number, patch: Partial<ScenarioReachFilter>) {
+    setZoomReachFilters((prev) => prev.map((item, itemIndex) => (itemIndex === index ? { ...item, ...patch } : item)))
+    setZoomPage(1)
+  }
+
+  function closeMarketDetailModal() {
+    setScenarioMarketDetailRow(null)
+    setModalSCurveChannel(null)
+    setModalSCurveData(null)
+    setModalSCurveMarket(null)
+    setModalSCurveError('')
+  }
+
+  async function fetchModalSCurves(market: string) {
+    if (!brand) return
+    setModalSCurveMarket(market)
+    setModalSCurveLoading(true)
+    setModalSCurveError('')
+    setModalSCurveData(null)
+    try {
+      const res = await axios.post<{ curves: { tv: ModalSCurvePoint[]; digital: ModalSCurvePoint[] }; summary: { baseline_tv_reach?: number; baseline_digital_reach?: number; tv_min_reach?: number; tv_max_reach?: number; digital_min_reach?: number; digital_max_reach?: number } }>(
+        `${apiBaseUrl}/api/s-curves-auto`,
+        { selected_brand: brand, selected_markets: [market], points: 41, min_scale: 0.2, max_scale: 2.5 },
+      )
+      setModalSCurveData({
+        tv: res.data.curves.tv,
+        digital: res.data.curves.digital,
+        baseline_tv_reach: res.data.summary.baseline_tv_reach,
+        baseline_digital_reach: res.data.summary.baseline_digital_reach,
+        tv_min_reach: res.data.summary.tv_min_reach,
+        tv_max_reach: res.data.summary.tv_max_reach,
+        digital_min_reach: res.data.summary.digital_min_reach,
+        digital_max_reach: res.data.summary.digital_max_reach,
+      })
+    } catch {
+      setModalSCurveError('Failed to load S-curve.')
+    } finally {
+      setModalSCurveLoading(false)
+    }
+  }
+
+  function renderMarketControlPanel(
+    filters: ScenarioReachFilter[],
+    setter: (index: number, patch: Partial<ScenarioReachFilter>) => void,
+    availableMarkets: string[],
+    panelKey: string,
+  ) {
+    const activeCount = filters.filter(f => f.markets.length > 0).length
+    const directionLabel = (d: ScenarioReachFilter['direction']) =>
+      d === 'higher' ? 'Gained more share' : d === 'lower' ? 'Lost share' : 'Held share'
+    const directionColor = (d: ScenarioReachFilter['direction']) =>
+      d === 'higher' ? 'text-emerald-700 bg-emerald-50 border-emerald-200'
+      : d === 'lower' ? 'text-rose-700 bg-rose-50 border-rose-200'
+      : 'text-slate-600 bg-slate-50 border-slate-200'
+
+    return (
+      <div className="rounded-2xl border border-slate-200 bg-white">
+        <button
+          type="button"
+          onClick={() => setMarketControlOpen(prev => !prev)}
+          className="flex w-full items-center justify-between px-4 py-3 text-left"
+        >
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-600">Market Change Control</span>
+            {activeCount > 0 && (
+              <span className="rounded-full bg-[#f4ece0] px-2 py-0.5 text-[10px] font-semibold text-[#7b5c33]">
+                {activeCount} condition{activeCount !== 1 ? 's' : ''} active
+              </span>
+            )}
+          </div>
+          <span className="text-xs font-semibold text-slate-400">{marketControlOpen ? 'Hide ▲' : 'Show ▼'}</span>
+        </button>
+
+        {marketControlOpen && (
+          <div className="border-t border-slate-100 px-4 pb-4 pt-3">
+            <p className="mb-3 text-xs text-slate-500">Filter scenarios to only show ones where selected markets moved in a specific direction vs last year.</p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {filters.map((filter, index) => {
+                const otherFilter = filters[index === 0 ? 1 : 0]
+                const dropdownKey = `${panelKey}-${index}`
+                const isOpen = openReachFilterIndex === (panelKey === 'main' ? index : index + 10)
+                const dropdownIndex = panelKey === 'main' ? index : index + 10
+                const available = availableMarkets.filter(m => !otherFilter.markets.includes(m))
+                return (
+                  <div key={dropdownKey} className="relative rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="flex items-center justify-between gap-2 mb-2">
+                      <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-slate-500">Condition {index + 1}</span>
+                      {filter.markets.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setter(index, { markets: [] })}
+                          className="text-[10px] font-semibold text-slate-400 hover:text-rose-500"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Market picker */}
+                    <button
+                      type="button"
+                      onClick={() => setOpenReachFilterIndex(prev => prev === dropdownIndex ? null : dropdownIndex)}
+                      className="flex w-full items-center justify-between rounded-xl border border-slate-300 bg-white px-3 py-2 text-left text-sm text-slate-700 transition hover:border-[#9c7a4a]"
+                    >
+                      <span className="truncate pr-2 text-sm">
+                        {filter.markets.length > 0 ? filter.markets.join(', ') : 'Select markets'}
+                      </span>
+                      <span className="text-xs text-slate-400">{isOpen ? '▲' : '▼'}</span>
+                    </button>
+
+                    {isOpen && (
+                      <div className="absolute left-0 right-0 top-[7.5rem] z-30 mx-3 rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
+                        <div className="max-h-48 space-y-1 overflow-y-auto pr-1">
+                          {available.map((market) => {
+                            const selected = filter.markets.includes(market)
+                            return (
+                              <label
+                                key={`${dropdownKey}-${market}`}
+                                className={`flex cursor-pointer items-center gap-3 rounded-lg px-3 py-1.5 text-sm transition ${selected ? 'bg-[#f4ece0] text-[#7b5c33]' : 'hover:bg-slate-50 text-slate-700'}`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={selected}
+                                  onChange={(e) => {
+                                    const next = e.target.checked ? [...filter.markets, market] : filter.markets.filter(m => m !== market)
+                                    setter(index, { markets: next })
+                                  }}
+                                  className="h-4 w-4 rounded border-slate-300 text-[#7b5c33] focus:ring-[#c9b79b]"
+                                />
+                                <span className="flex-1">{market}</span>
+                              </label>
+                            )
+                          })}
+                        </div>
+                        <div className="mt-2 flex justify-end border-t border-slate-100 pt-2">
+                          <button type="button" onClick={() => setOpenReachFilterIndex(null)}
+                            className="rounded-full bg-[#7b5c33] px-3 py-1 text-xs font-semibold text-white hover:bg-[#6c4f2a]">
+                            Done
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Direction pills */}
+                    <div className="mt-2 flex gap-2">
+                      {(['higher', 'lower', 'equal'] as const).map(dir => (
+                        <button
+                          key={dir}
+                          type="button"
+                          disabled={!filter.markets.length}
+                          onClick={() => setter(index, { direction: dir })}
+                          className={`flex-1 rounded-full border px-2 py-1.5 text-[11px] font-semibold transition disabled:opacity-40 ${
+                            filter.direction === dir ? directionColor(dir) : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300'
+                          }`}
+                        >
+                          {directionLabel(dir)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   async function startScenarioGeneration() {
     if (!scenarioHandoff) {
       setScenarioError('Prepare scenario guidance before generating scenarios.')
@@ -667,6 +974,138 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     setScenarioStatus(response.data.status)
     setScenarioProgress(response.data.progress ?? 0)
     setScenarioMessage(response.data.message ?? 'Scenario generation queued.')
+  }
+
+  async function fetchZoomResults(jobId: string, page = zoomPage) {
+    const params: Record<string, string | number> = {
+      page,
+      page_size: 5,
+      sort_key: zoomSortKey,
+      sort_dir: zoomSortDir,
+    }
+    if (zoomMinVolumePct.trim() !== '') params.min_volume_uplift_pct = Number(zoomMinVolumePct)
+    if (zoomMinRevenuePct.trim() !== '') params.min_revenue_uplift_pct = Number(zoomMinRevenuePct)
+    if (zoomMaxBudgetUtilizedPctFilter.trim() !== '') params.max_budget_utilized_pct = Number(zoomMaxBudgetUtilizedPctFilter)
+    zoomReachFilters.filter(f => f.markets.length > 0).slice(0, 2).forEach((filter, index) => {
+      const suffix = index === 0 ? '' : '_2'
+      params[`reach_share_market${suffix}`] = filter.markets.join(',')
+      params[`reach_share_direction${suffix}`] = filter.direction
+    })
+    const response = await axios.get<ScenarioResultsResponse>(`${apiBaseUrl}/api/scenarios/jobs/${jobId}/results`, {
+      params,
+      validateStatus: (status) => [200, 202, 409, 410].includes(status),
+    })
+    if (response.status === 200) {
+      setZoomResults(response.data)
+      setZoomPage(response.data.pagination.page)
+      setZoomStatus('completed')
+      setZoomError('')
+      setZoomLoading(false)
+      return
+    }
+    if (response.status === 202) {
+      setZoomStatus('running')
+      return
+    }
+    const payload = response.data as { error_reason?: string }
+    setZoomError(payload.error_reason ?? 'Failed to load zoom results.')
+    setZoomLoading(false)
+  }
+
+  function openZoomModal(anchor: ScenarioItem) {
+    setZoomAnchor(anchor)
+    setZoomBandPct(5)
+    setZoomPrompt('')
+    setZoomLoading(false)
+    setZoomJobId('')
+    setZoomStatus('idle')
+    setZoomProgress(0)
+    setZoomMessage('')
+    setZoomResults(null)
+    setZoomError('')
+    setZoomPage(1)
+    setZoomSortKey('balanced_score')
+    setZoomMinVolumePct('')
+    setZoomMinRevenuePct('')
+    setZoomMaxBudgetUtilizedPctFilter('')
+    setZoomReachFilters([
+      { markets: [], direction: 'higher' },
+      { markets: [], direction: 'lower' },
+    ])
+    setOpenZoomReachFilterIndex(null)
+  }
+
+  function closeZoomModal() {
+    setZoomAnchor(null)
+    setZoomLoading(false)
+    setZoomJobId('')
+    setZoomStatus('idle')
+    setZoomProgress(0)
+    setZoomMessage('')
+    setZoomResults(null)
+    setZoomError('')
+    setZoomPage(1)
+    setOpenZoomReachFilterIndex(null)
+  }
+
+  async function startZoomGeneration(anchor: ScenarioItem) {
+    if (!scenarioHandoff) return
+    setZoomAnchor(anchor)
+    setZoomResults(null)
+    setZoomError('')
+    setZoomStatus('queued')
+    setZoomProgress(0)
+    setZoomMessage('')
+    setZoomLoading(true)
+    setZoomPage(1)
+    try {
+      let jobPayload = { ...scenarioHandoff.suggested_job_payload }
+
+      if (zoomPrompt.trim()) {
+        const reviseRes = await axios.post<DebugResponse>(`${apiBaseUrl}/api/scenarios/intent/debug`, {
+          selected_brand: brand,
+          selected_markets: markets,
+          budget_increase_type: 'percentage',
+          budget_increase_value: budgetIncreasePct,
+          market_overrides: {},
+          intent_prompt: prompt,
+          review_mode: 'revise',
+          user_feedback: zoomPrompt.trim(),
+          current_interpretation: result?.normalized_interpretation ?? null,
+        })
+        const handoffRes = await axios.post<ScenarioHandoffResponse>(`${apiBaseUrl}/api/scenarios/intent/handoff`, {
+          selected_brand: brand,
+          selected_markets: markets,
+          budget_increase_type: 'percentage',
+          budget_increase_value: budgetIncreasePct,
+          market_overrides: {},
+          intent_prompt: prompt,
+          approved_interpretation: reviseRes.data.normalized_interpretation,
+          scenario_range_lower_pct: scenarioRangeLowerPct,
+          scenario_range_upper_pct: scenarioRangeUpperPct,
+        })
+        jobPayload = { ...handoffRes.data.suggested_job_payload }
+      }
+
+      const bandLower = anchor.total_new_spend * (1 - zoomBandPct / 100)
+      const bandUpper = anchor.total_new_spend * (1 + zoomBandPct / 100)
+      const response = await axios.post<ScenarioJobCreateResponse>(`${apiBaseUrl}/api/scenarios/jobs`, {
+        ...jobPayload,
+        scenario_budget_lower: bandLower,
+        scenario_budget_upper: bandUpper,
+        scenario_label_prefix: `Near ${scenarioDisplayName(anchor)}`,
+        target_scenarios: 1000,
+        max_runtime_seconds: 120,
+      })
+      setZoomJobId(response.data.job_id)
+      setZoomStatus(response.data.status)
+      setZoomProgress(response.data.progress ?? 0)
+      setZoomMessage(response.data.message ?? 'Zoom generation queued.')
+    } catch (err) {
+      setZoomError(axios.isAxiosError(err) ? (err.response?.data?.detail ?? 'Failed to start zoom generation.') : 'Unexpected error.')
+      setZoomStatus('failed')
+      setZoomLoading(false)
+    }
   }
 
   async function handleApprove() {
@@ -719,6 +1158,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     ...(scenarioHandoff?.resolved_intent.held_markets ?? []),
   ]
   const scenarioGenerationActive = scenarioStatus === 'queued' || scenarioStatus === 'running'
+  const zoomGenerationActive = zoomStatus === 'queued' || zoomStatus === 'running'
 
   const confidencePct = hitl ? Math.round(hitl.confidence * 100) : null
   const confColor = confidencePct == null ? '' : confidencePct >= 85 ? 'text-emerald-600' : confidencePct >= 65 ? 'text-amber-600' : 'text-red-500'
@@ -854,10 +1294,28 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     return `${fixed > 0 ? '+' : ''}${fixed}%`
   }
 
+  function formatPlainNumber(value: number | null | undefined, digits = 1) {
+    if (value == null || !Number.isFinite(value)) return 'n/a'
+    return Number(value.toFixed(digits)).toString()
+  }
+
   function scenarioBudgetUtilizedPct(item: ScenarioItem) {
     const targetBudget = Number(scenarioResults?.summary.target_budget ?? scenarioHandoff?.budget_context.target_budget ?? 0)
     if (!Number.isFinite(targetBudget) || targetBudget <= 0) return 0
     return (item.total_new_spend / targetBudget) * 100
+  }
+
+  function scenarioDisplayName(item: Pick<ScenarioItem, 'scenario_id' | 'family'> | Pick<SavedScenarioPlan, 'scenario_id' | 'family'>) {
+    const rawId = String(item.scenario_id || '').trim()
+    const family = String(item.family || '').trim()
+    if (!family) return rawId || 'Scenario'
+    const familyLower = family.toLowerCase()
+    const idLower = rawId.toLowerCase()
+    if (!rawId) return family
+    if (idLower.startsWith(familyLower) || idLower.includes(`/ ${familyLower}`) || idLower.includes(`near ${familyLower}`)) {
+      return rawId
+    }
+    return `${family} / ${rawId}`
   }
 
   function buildScenarioPlanPayload(item: ScenarioItem): SavedScenarioPlan {
@@ -893,7 +1351,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       ].slice(0, 20)
       window.localStorage.setItem(storageKey, JSON.stringify(next))
       setSavedScenarioPlans(next)
-      setScenarioPlanMessage(`Saved ${item.scenario_id}. You can download this plan later from the same modal.`)
+      setScenarioPlanMessage(`Saved ${scenarioDisplayName(item)}. You can download this plan later from the same modal.`)
     } catch {
       setScenarioPlanMessage('Could not save this plan locally.')
     }
@@ -901,7 +1359,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
 
   function buildScenarioPlanCsv(plan: SavedScenarioPlan) {
     const headerRows = [
-      ['Scenario ID', plan.scenario_id],
+      ['Scenario ID', scenarioDisplayName(plan)],
       ['Brand', plan.brand],
       ['Prompt', plan.prompt],
       ['Family', plan.family],
@@ -913,15 +1371,44 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       [],
     ]
     const marketRows = [
-      ['Market', 'Old Spend', 'New Spend', 'Old Reach Share %', 'New Reach Share %', 'New Budget Share %'],
-      ...plan.markets.map((row) => [
-        row.market,
-        Number(row.old_total_spend ?? 0),
-        Number(row.new_total_spend ?? 0),
-        row.fy25_reach_share_pct ?? '',
-        row.new_reach_share_pct ?? '',
-        Number(row.new_budget_share ?? 0) * 100,
-      ]),
+      [
+        'Market',
+        'Old Total Spend', 'New Total Spend',
+        'Old TV Spend', 'New TV Spend',
+        'Old Digital Spend', 'New Digital Spend',
+        'TV Spend Share % (Before)', 'TV Spend Share % (After)',
+        'Digital Spend Share % (Before)', 'Digital Spend Share % (After)',
+        'Old Reach Share %', 'New Reach Share %',
+        'New Budget Share %',
+      ],
+      ...plan.markets.map((row) => {
+        const oldTvSpend = (Number(row.fy25_tv_reach ?? 0)) * (Number(row.tv_cpr ?? 0))
+        const oldDigSpend = (Number(row.fy25_digital_reach ?? 0)) * (Number(row.digital_cpr ?? 0))
+        const newTvSpend = Number(row.new_total_tv_spend ?? 0)
+        const newDigSpend = Number(row.new_total_digital_spend ?? 0)
+        const oldTotal = oldTvSpend + oldDigSpend
+        const newTotal = newTvSpend + newDigSpend
+        const oldTvSharePct = oldTotal > 0 ? Number(((oldTvSpend / oldTotal) * 100).toFixed(2)) : ''
+        const newTvSharePct = newTotal > 0 ? Number(((newTvSpend / newTotal) * 100).toFixed(2)) : ''
+        const oldDigSharePct = oldTotal > 0 ? Number((((oldDigSpend) / oldTotal) * 100).toFixed(2)) : ''
+        const newDigSharePct = newTotal > 0 ? Number((((newDigSpend) / newTotal) * 100).toFixed(2)) : ''
+        return [
+          row.market,
+          Number(row.old_total_spend ?? 0),
+          Number(row.new_total_spend ?? 0),
+          Number(oldTvSpend.toFixed(0)),
+          Number(newTvSpend.toFixed(0)),
+          Number(oldDigSpend.toFixed(0)),
+          Number(newDigSpend.toFixed(0)),
+          oldTvSharePct,
+          newTvSharePct,
+          oldDigSharePct,
+          newDigSharePct,
+          row.fy25_reach_share_pct ?? '',
+          row.new_reach_share_pct ?? '',
+          Number(row.new_budget_share ?? 0) * 100,
+        ]
+      }),
     ]
     return [...headerRows, ...marketRows]
       .map((row) => row.map((cell) => escapeCsvValue(cell)).join(','))
@@ -935,12 +1422,12 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     const url = window.URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `${item.scenario_id.toLowerCase()}-plan.csv`
+    anchor.download = `${scenarioDisplayName(item).toLowerCase().replace(/[^a-z0-9]+/g, '-')}-plan.csv`
     document.body.appendChild(anchor)
     anchor.click()
     anchor.remove()
     window.URL.revokeObjectURL(url)
-    setScenarioPlanMessage(`Downloaded ${item.scenario_id} plan as CSV.`)
+    setScenarioPlanMessage(`Downloaded ${scenarioDisplayName(item)} plan as CSV.`)
   }
 
   function downloadSavedScenarioPlan(plan: SavedScenarioPlan) {
@@ -949,7 +1436,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     const url = window.URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `${plan.scenario_id.toLowerCase()}-plan.csv`
+    anchor.download = `${scenarioDisplayName(plan).toLowerCase().replace(/[^a-z0-9]+/g, '-')}-plan.csv`
     document.body.appendChild(anchor)
     anchor.click()
     anchor.remove()
@@ -971,7 +1458,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     setScenarioModalSplitView(plan.split_view ?? 'reach')
     setScenarioModalSortBy('budget_delta')
     setScenarioModalChangeFilter('all')
-    setScenarioPlanMessage(`Opened saved plan ${plan.scenario_id}.`)
+    setScenarioPlanMessage(`Opened saved plan ${scenarioDisplayName(plan)}.`)
     setSavedPlansOpen(false)
   }
 
@@ -1064,7 +1551,9 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   ) {
     const cardKey = `${tone}-${review.market}`
     const isExpanded = Boolean(expandedQaCards[cardKey])
+    const isActionExpanded = Boolean(qaActionExpanded[cardKey])
     const selectedAction = qaActionSelections[review.market] ?? review.action_direction
+    const actionChanged = qaActionSelections[review.market] != null && qaActionSelections[review.market] !== review.action_direction
     const actionOptions = ['increase', 'slight_increase', 'maintain', 'slight_decrease', 'decrease']
     const reasonPoints = tone === 'support'
       ? (review.supporting_points.length ? review.supporting_points : [review.summary])
@@ -1094,24 +1583,42 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
             {review.verdict === 'at_risk' ? 'At risk' : review.verdict === 'supported' ? 'Supported' : review.verdict === 'mixed' ? 'Mixed' : 'Needs data'}
           </span>
         </div>
-        <div className="mt-2 flex flex-wrap gap-2">
-          {actionOptions.map((action) => {
-            const isSelected = selectedAction === action
-            return (
-              <button
-                key={`${review.market}-${action}`}
-                type="button"
-                onClick={() => setQaActionSelection(review.market, action)}
-                className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
-                  isSelected
-                    ? 'border-[#9c7a4a] bg-[#f4ece0] text-[#7b5c33]'
-                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
-                }`}
-              >
-                {formatActionLabel(action)}
-              </button>
-            )
-          })}
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setQaActionExpanded(prev => ({ ...prev, [cardKey]: !prev[cardKey] }))}
+            className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
+              actionChanged
+                ? 'border-[#9c7a4a] bg-[#f4ece0] text-[#7b5c33]'
+                : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+            }`}
+          >
+            {actionChanged ? `✓ ${formatActionLabel(selectedAction)}` : 'Change Action'}
+          </button>
+          {isActionExpanded && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {actionOptions.map((action) => {
+                const isSelected = selectedAction === action
+                return (
+                  <button
+                    key={`${review.market}-${action}`}
+                    type="button"
+                    onClick={() => {
+                      setQaActionSelection(review.market, action)
+                      setQaActionExpanded(prev => ({ ...prev, [cardKey]: false }))
+                    }}
+                    className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
+                      isSelected
+                        ? 'border-[#9c7a4a] bg-[#f4ece0] text-[#7b5c33]'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                    }`}
+                  >
+                    {formatActionLabel(action)}
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </div>
         <ul className={`mt-2 list-disc space-y-1 pl-5 text-sm leading-5 ${toneClasses.text}`}>
           {visiblePoints.map((point, index) => (
@@ -1183,7 +1690,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   <div key={plan.scenario_id} className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3">
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <p className="text-sm font-semibold text-slate-900">{plan.scenario_id}</p>
+                        <p className="text-sm font-semibold text-slate-900">{scenarioDisplayName(plan)}</p>
                         <p className="mt-0.5 text-[11px] text-slate-500">{plan.brand} · {plan.family}</p>
                       </div>
                       <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-500">
@@ -1250,111 +1757,108 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       {/* Main layout */}
       <div className="space-y-4">
 
-        <div className="budget-panel p-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Setup</p>
-              <p className="mt-1 text-sm text-slate-600">Brand, market selection, prompt, and budget band live here. After you run it, this setup collapses so the review stages stay visible.</p>
-            </div>
+        <div className="budget-panel">
+          {/* Header */}
+          <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-[#ede4d6]">
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#9c8060]">Setup</p>
             {phase !== 'idle' ? (
               <button
                 type="button"
                 onClick={() => setSetupCollapsed((prev) => !prev)}
-                className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-[#9c7a4a] hover:text-[#7b5c33]"
+                className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-500 transition hover:border-[#9c7a4a] hover:text-[#7b5c33]"
               >
-                {setupCollapsed ? 'Expand Setup' : 'Collapse Setup'}
+                {setupCollapsed ? 'Expand ▼' : 'Collapse ▲'}
               </button>
             ) : null}
           </div>
 
           {setupCollapsed && phase !== 'idle' ? (
-            <div className="mt-4 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2 px-5 py-3">
               <span className="rounded-full bg-[#f4ece0] px-3 py-1 text-[11px] font-semibold text-[#7a5b31]">{brand || 'No brand'}</span>
               <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">{markets.length} markets</span>
               <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">Budget {formatSignedPct(budgetIncreasePct, 1)}</span>
-              <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">Band {formatMetric(scenarioRangeLowerPct, 0)}% to {formatMetric(scenarioRangeUpperPct, 0)}%</span>
-              <p className="min-w-full text-sm text-slate-600">{prompt}</p>
+              <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">Band {formatPlainNumber(scenarioRangeLowerPct, 1)}% to {formatPlainNumber(scenarioRangeUpperPct, 1)}%</span>
+              {result?.selection?.baseline_budget ? (
+                <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
+                  {formatCompactBudgetValue(result.selection.baseline_budget)} → <span className={budgetIncreasePct >= 0 ? 'text-emerald-600' : 'text-rose-500'}>{formatCompactBudgetValue(result.selection.baseline_budget * (1 + budgetIncreasePct / 100))}</span>
+                </span>
+              ) : null}
+              <p className="min-w-full truncate text-xs text-slate-500">{prompt}</p>
             </div>
           ) : (
-            <div className="mt-5 space-y-5">
-              <div className="grid gap-3 xl:grid-cols-[minmax(220px,1.15fr)_minmax(180px,0.9fr)_minmax(260px,1.2fr)_minmax(220px,1fr)]">
-                <div className="rounded-2xl border border-[#e7dcc9] bg-[#fcfaf5] px-4 py-3 shadow-sm">
-                  <label className="budget-label">Brand</label>
+            <div className="divide-y divide-[#ede4d6]">
+              {/* Top strip — Brand · Budget · Run */}
+              <div className="flex min-h-[72px] divide-x divide-[#ede4d6]">
+                {/* Brand */}
+                <div className="flex min-w-[200px] flex-1 flex-col justify-center px-5 py-4">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Brand</p>
                   <select
                     value={brand}
                     onChange={(e) => { setBrand(e.target.value); setMarkets(config?.markets_by_brand[e.target.value] ?? []); setSetupCollapsed(false) }}
-                    className="mt-2.5 w-full rounded-xl border border-[#d7cbb7] bg-white px-3 py-2.5 text-sm font-medium text-slate-700 outline-none focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
+                    className="mt-2 w-full rounded-xl border border-[#d7cbb7] bg-white px-3 py-2 text-sm font-medium text-slate-800 outline-none focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
                   >
                     {(config?.brands ?? []).map((b) => <option key={b} value={b}>{b}</option>)}
                   </select>
                 </div>
-                <div className="rounded-2xl border border-[#e7dcc9] bg-[#fcfaf5] px-4 py-3 shadow-sm">
-                  <label className="budget-label">Target Budget Change (%)</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={budgetIncreasePct}
-                    onChange={(e) => setBudgetIncreasePct(Number(e.target.value))}
-                    className="mt-2.5 w-full rounded-xl border border-[#d7cbb7] bg-white px-3 py-2.5 text-lg font-semibold text-slate-700 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
-                  />
-                  <p className="mt-2 text-[11px] text-slate-500">Overall budget shift from current baseline.</p>
-                </div>
-                <div className="rounded-2xl border border-[#e7dcc9] bg-[#fcfaf5] px-4 py-3 shadow-sm">
+
+                {/* Scenario Band */}
+                <div className="flex min-w-[240px] flex-1 flex-col justify-center px-5 py-4">
                   <div className="flex items-center justify-between gap-2">
-                    <label className="budget-label">Scenario Budget Band (%)</label>
-                    <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Post approval</span>
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Scenario Band</p>
+                    <span className="text-[10px] text-slate-400">Post approval</span>
                   </div>
-                  <div className="mt-2.5 grid grid-cols-[1fr_auto_1fr] items-center gap-2">
-                    <div>
-                      <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Min</p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <div className="relative w-full">
                       <input
                         type="number"
                         step="0.1"
                         value={scenarioRangeLowerPct}
                         onChange={(e) => setScenarioRangeLowerPct(Number(e.target.value))}
-                        className="mt-1 w-full rounded-xl border border-[#d7cbb7] bg-white px-3 py-2.5 text-base font-semibold text-slate-700 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
+                        className="w-full rounded-xl border border-[#d7cbb7] bg-white px-3 py-2 pr-10 text-sm font-semibold text-slate-800 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
                       />
+                      <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm font-semibold text-[#8c7554]">%</span>
                     </div>
-                    <span className="mt-5 text-sm font-semibold text-slate-300">to</span>
-                    <div>
-                      <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Max</p>
+                    <span className="shrink-0 text-xs text-slate-300">to</span>
+                    <div className="relative w-full">
                       <input
                         type="number"
                         step="0.1"
                         value={scenarioRangeUpperPct}
                         onChange={(e) => setScenarioRangeUpperPct(Number(e.target.value))}
-                        className="mt-1 w-full rounded-xl border border-[#d7cbb7] bg-white px-3 py-2.5 text-base font-semibold text-slate-700 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
+                        className="w-full rounded-xl border border-[#d7cbb7] bg-white px-3 py-2 pr-10 text-sm font-semibold text-slate-800 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
                       />
+                      <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm font-semibold text-[#8c7554]">%</span>
                     </div>
                   </div>
                 </div>
-                <div className="flex items-stretch">
-                  <button
-                    type="button"
-                    onClick={() => run('initial')}
-                    disabled={loading || !prompt.trim() || markets.length === 0}
-                    className="flex w-full flex-col items-start justify-center rounded-2xl bg-gradient-to-br from-[#8b6a3f] to-[#6f522d] px-5 py-4 text-left text-white shadow-md shadow-[#7b5c33]/20 transition hover:from-[#7d5f38] hover:to-[#624826] disabled:cursor-not-allowed disabled:bg-slate-300 disabled:from-slate-300 disabled:to-slate-300 disabled:shadow-none"
-                  >
-                    {loading ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                        Interpreting…
-                      </span>
-                    ) : (
-                      <>
-                        <span className="text-xs font-semibold uppercase tracking-[0.16em] text-white/70">Run Trinity</span>
-                        <span className="mt-1 text-base font-semibold">Interpret Prompt →</span>
-                        <span className="mt-1 text-xs text-white/75">Build the plan before QA and scenario generation.</span>
-                      </>
-                    )}
-                  </button>
-                </div>
+
+                {/* Run button */}
+                <button
+                  type="button"
+                  onClick={() => run('initial')}
+                  disabled={loading || !prompt.trim() || markets.length === 0}
+                  className="flex w-[200px] shrink-0 flex-col items-start justify-center bg-gradient-to-br from-[#8b6a3f] to-[#6f522d] px-5 py-4 text-left text-white transition hover:from-[#7d5f38] hover:to-[#624826] disabled:cursor-not-allowed disabled:from-slate-300 disabled:to-slate-300"
+                >
+                  {loading ? (
+                    <span className="flex items-center gap-2 text-sm font-semibold">
+                      <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                      Interpreting…
+                    </span>
+                  ) : (
+                    <>
+                      <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/60">Run Trinity</span>
+                      <span className="mt-1 text-sm font-bold">Interpret Prompt →</span>
+                      <span className="mt-1 text-[11px] leading-4 text-white/60">Build the plan before QA and scenario generation.</span>
+                    </>
+                  )}
+                </button>
               </div>
 
-              <div className="grid gap-4 xl:grid-cols-[minmax(340px,420px)_minmax(0,1fr)]">
-                <div className="rounded-[28px] border border-[#eadfce] bg-gradient-to-b from-[#fcfaf5] to-white p-4 shadow-sm">
+              {/* Bottom row — Markets + Prompt */}
+              <div className="grid gap-0 xl:grid-cols-[minmax(280px,380px)_minmax(0,1fr)] divide-x divide-[#ede4d6]">
+                <div className="px-5 py-4">
                   <div className="flex items-center justify-between gap-2">
-                    <label className="budget-label">Markets <span className="font-normal text-slate-400">({markets.length} selected)</span></label>
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Markets <span className="font-normal normal-case tracking-normal text-slate-400">({markets.length} selected)</span></p>
                     <div className="flex gap-1.5">
                       <button type="button" onClick={() => setMarkets(availableMarkets)}
                         className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-0.5 text-[11px] font-semibold text-slate-500 hover:border-[#9c7a4a]">All</button>
@@ -1362,35 +1866,33 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                         className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-0.5 text-[11px] font-semibold text-slate-500 hover:border-[#9c7a4a]">None</button>
                     </div>
                   </div>
-                  <p className="mt-2 text-xs text-slate-500">Pick the markets you want Trinity to consider in this run.</p>
-                  <div className="mt-3 max-h-56 space-y-1.5 overflow-y-auto rounded-2xl border border-[#ece4d6] bg-[#fbf8f1] p-2.5">
+                  <div className="mt-3 max-h-52 space-y-1 overflow-y-auto">
                     {availableMarkets.map((m) => (
-                      <label key={`setup-${m}`} className={`flex cursor-pointer items-center justify-between rounded-xl border px-3 py-2 text-sm transition ${markets.includes(m) ? 'border-[#9c7a4a] bg-[#f4ece0] text-[#7a5b31] shadow-sm' : 'border-transparent bg-white text-slate-600 hover:border-[#d7cbb7]'}`}>
+                      <label key={`setup-${m}`} className={`flex cursor-pointer items-center justify-between rounded-xl border px-3 py-2 text-sm transition ${markets.includes(m) ? 'border-[#c9a87a] bg-[#f9f2e8] text-[#7a5b31]' : 'border-transparent text-slate-600 hover:bg-slate-50'}`}>
                         <span>{m}</span>
-                        <input type="checkbox" checked={markets.includes(m)} onChange={() => toggleMarket(m)} className="h-3.5 w-3.5 rounded border-slate-300 text-primary" />
+                        <input type="checkbox" checked={markets.includes(m)} onChange={() => toggleMarket(m)} className="h-3.5 w-3.5 rounded border-slate-300 text-[#7b5c33]" />
                       </label>
                     ))}
                   </div>
                 </div>
-                <div className="rounded-[28px] border border-[#eadfce] bg-gradient-to-b from-white to-[#fcfaf5] p-4 shadow-sm">
-                  <label className="budget-label">Prompt</label>
-                  <p className="mt-2 text-xs text-slate-500">Describe the market allocation logic you want. Multiple instructions can be combined in the same prompt.</p>
+                <div className="flex flex-col px-5 py-4">
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Prompt</p>
                   <textarea
                     rows={6}
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
                     placeholder="e.g. Increase media where I am losing market share and brand salience is below category salience…"
-                    className="mt-3 min-h-[196px] w-full resize-none rounded-2xl border border-[#d7cbb7] bg-white px-4 py-3 text-sm leading-7 text-slate-700 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
+                    className="mt-2 flex-1 min-h-[160px] w-full resize-none rounded-xl border border-[#d7cbb7] bg-white px-4 py-3 text-sm leading-6 text-slate-700 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
                   />
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">Loss recovery</span>
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">Salience based</span>
-                    <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">Multi-condition prompt</span>
+                  <div className="mt-2.5 flex flex-wrap gap-1.5">
+                    {['Loss recovery', 'Salience based', 'Multi-condition'].map((tag) => (
+                      <span key={tag} className="rounded-full border border-[#d7cbb7] px-2.5 py-0.5 text-[11px] text-slate-500">{tag}</span>
+                    ))}
                   </div>
                 </div>
               </div>
 
-              {error ? <p className="rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{error}</p> : null}
+              {error ? <p className="mx-5 mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{error}</p> : null}
             </div>
           )}
         </div>
@@ -1522,40 +2024,124 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
           {/* ONE results panel — all stages inside */}
           {(phase === 'revealing' || phase === 'done') && interp && (
             <div className="budget-panel overflow-hidden">
+              <div className="divide-y divide-slate-100">
 
-              {/* Clickable header — always visible */}
+
+              {/* Sections: QA + Monte Carlo */}
+              {allRevealed && hitlMode === 'approved' && (
+                <>
+                  <div className="flex flex-col">
+                  {/* QA section */}
+                  <div id="business-qa-check" className="order-2 px-5 py-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Business QA Check</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {approvalEvaluation ? (
+                          <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
+                            {approvalEvaluation.approved_market_count} markets
+                          </span>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => setQaSectionCollapsed((prev) => !prev)}
+                          className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-[#9c7a4a] hover:text-[#7b5c33]"
+                        >
+                          {qaSectionCollapsed ? 'Expand ▼' : 'Collapse ▲'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {!qaSectionCollapsed && approvalLoading && (
+                      <div className="mt-4 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                        <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-[#7b5c33]" />
+                        <div>
+                          <p className="text-sm font-semibold text-slate-700">Checking approved actions</p>
+                          <p className="mt-0.5 text-xs text-slate-500">Looking for cases where high-elasticity markets are being cut or low-efficiency markets are being pushed.</p>
+                        </div>
+                      </div>
+                    )}
+
+                    {!qaSectionCollapsed && approvalError ? <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{approvalError}</p> : null}
+
+                    {!qaSectionCollapsed && approvalEvaluation && (
+                      <div className="mt-4 space-y-4">
+
+                        {/* Reasoning — what Trinity understood from the prompt */}
+                        <div className="rounded-2xl border border-[#e8ddd0] bg-[#faf6f0] px-4 py-4">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8c7554]">What Trinity Understood</p>
+                          <p className="mt-2 text-sm font-semibold text-slate-800 leading-5">{interp?.goal || prompt}</p>
+                          {interp?.reasoning && (
+                            <p className="mt-2 text-sm leading-6 text-slate-600">{interp.reasoning}</p>
+                          )}
+                          {(interp?.assumptions ?? []).length > 0 && (
+                            <div className="mt-3 space-y-1">
+                              {(interp?.assumptions ?? []).map((a, i) => (
+                                <p key={i} className="text-xs text-slate-500 leading-4">· {a}</p>
+                              ))}
+                            </div>
+                          )}
+                          {approvalHeadline && (
+                            <p className="mt-3 text-xs font-semibold text-[#7b5c33] leading-5">{approvalHeadline}</p>
+                          )}
+                        </div>
+
+                        <div className="grid gap-3 lg:grid-cols-3">
+                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
+                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-700">Supported</p>
+                            <p className="mt-2 text-3xl font-semibold text-emerald-800">{supportedReviews.length}</p>
+                            <p className="mt-1 text-xs text-emerald-700">Actions where the economics line up with the recommendation.</p>
+                          </div>
+                          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
+                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-amber-700">Mixed</p>
+                            <p className="mt-2 text-3xl font-semibold text-amber-800">{mixedReviews.length}</p>
+                            <p className="mt-1 text-xs text-amber-700">Actions with both support and caution signals.</p>
+                          </div>
+                          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4">
+                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-rose-700">At Risk</p>
+                            <p className="mt-2 text-3xl font-semibold text-rose-800">{atRiskReviews.length}</p>
+                            <p className="mt-1 text-xs text-rose-700">Actions where responsiveness or salience conflicts with the recommendation.</p>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-3 lg:grid-cols-2">
+                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
+                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-700">What Supports The Plan</p>
+                            <div className="mt-3 grid max-h-[34rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
+                              {supportPlanReviews.length > 0
+                                ? supportPlanReviews.map((review) => renderApprovalReasonBlock(review, 'support'))
+                                : <p className="text-sm text-emerald-800">No support signals available.</p>}
+                            </div>
+                          </div>
+                          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4">
+                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-rose-700">What Needs Review</p>
+                            <div className="mt-3 grid max-h-[34rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
+                              {needsReviewPlanReviews.length > 0
+                                ? needsReviewPlanReviews.map((review) => renderApprovalReasonBlock(review, 'review'))
+                                : <p className="text-sm text-rose-800">No review flags available.</p>}
+                            </div>
+                          </div>
+                        </div>
+
+
+              {/* Section: Interpretation Steps + Scoring Grid — collapsed by default */}
+              <div className="px-5 py-3">
+              {/* Toggle */}
               <button
                 type="button"
-                onClick={() => setResultsCollapsed(prev => !prev)}
-                className="flex w-full items-start justify-between px-5 py-4 text-left"
+                onClick={() => setStepsCollapsed(prev => !prev)}
+                className="flex w-full items-center justify-between rounded-xl border border-[#e8ddd0] bg-[#faf6f0] px-3 py-2.5 text-left transition hover:bg-[#f5ede0]"
               >
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">Trinity Analysis</p>
-                  <p className="mt-1 text-sm font-medium text-slate-800 leading-5">{interp.goal || prompt}</p>
-                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                    {hitlMode === 'approved'
-                      ? <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700">✓ Approved · {finalMarkets.length} markets</span>
-                      : confidencePct != null && <span className={`rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold ${confColor}`}>{confidencePct}% confidence</span>
-                    }
-                    {scenarioResults && <span className="text-xs text-slate-400">{scenarioResults.summary.scenario_count.toLocaleString()} scenarios ready</span>}
-                  </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-[0.14em] text-[#8c7554]">How Trinity Interpreted This</span>
+                  <span className="rounded-full bg-[#e8ddd0] px-2 py-0.5 text-[10px] font-semibold text-[#7b5c33]">{steps.length} steps · {finalMarkets.length} markets</span>
                 </div>
-                <span className="shrink-0 ml-3 rounded-full border border-[#d7cbb7] bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600">
-                  {resultsCollapsed ? 'Expand ▼' : 'Collapse ▲'}
-                </span>
+                <span className="text-xs font-semibold text-[#8c7554]">{stepsCollapsed ? 'Show ▼' : 'Hide ▲'}</span>
               </button>
 
-              {!resultsCollapsed && (
-              <div className="divide-y divide-slate-100 border-t border-slate-100">
-
-              {/* Section: Interpretation Steps + Scoring Grid */}
-              <div className="px-5 py-5">
-              {/* Goal */}
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">Interpreted Goal</p>
-              <p className="mt-1.5 text-sm font-medium text-slate-800 leading-5">{interp.goal || prompt}</p>
-
-              {/* Step pipeline */}
-              <div className="mt-4 space-y-1.5">
+              {!stepsCollapsed && (
+              <div className="mt-3 space-y-1.5">
                 <p className="text-[11px] font-medium text-slate-400">Click any step to inspect how the filter worked.</p>
                 {interp.is_multi_segment ? (
                   <>
@@ -1706,10 +2292,23 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   </>
                 )}
               </div>
+              )}
 
-              {/* 5-Column Market Scoring Grid */}
+              {/* 5-Column Market Scoring Grid — collapsible */}
               {showScoringGrid && (
-                <div className="mt-4 space-y-2">
+                <div className="mt-4">
+                  <button
+                    type="button"
+                    onClick={() => setScoringGridCollapsed(prev => !prev)}
+                    className="flex w-full items-center justify-between rounded-xl border border-[#e8ddd0] bg-[#faf6f0] px-3 py-2 text-left transition hover:bg-[#f5ede0]"
+                  >
+                    <span className="text-xs font-semibold uppercase tracking-[0.14em] text-[#8c7554]">Market Scoring — {dispositions.length} markets</span>
+                    <span className="text-xs font-semibold text-[#8c7554]">{scoringGridCollapsed ? 'Show ▼' : 'Hide ▲'}</span>
+                  </button>
+                </div>
+              )}
+              {showScoringGrid && !scoringGridCollapsed && (
+                <div className="mt-2 space-y-2">
                   <div className="flex items-baseline justify-between">
                     <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">
                       Market Scoring — {dispositions.length} markets
@@ -1769,183 +2368,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 </div>
               )}
               </div>
-
-              {/* Section: HITL */}
-              {allRevealed && hitl && hitlMode !== 'approved' && (
-                <div className="px-5 py-5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1">
-                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Does this look right?</p>
-                      <p className="mt-1.5 text-sm text-slate-700 leading-5">{hitl.summary}</p>
-                      {hitl.review_reason.length > 0 && (
-                        <div className="mt-2 space-y-1">
-                          {hitl.review_reason.map((r, i) => (
-                            <p key={i} className="text-xs text-amber-700 leading-4">⚠ {r}</p>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <span className={`shrink-0 text-lg font-bold tabular-nums ${confColor}`}>
-                      {confidencePct}%
-                    </span>
-                  </div>
-
-                  {hitlMode === 'review' && (
-                    <div className="mt-4 flex gap-2.5">
-                      <button
-                        type="button" onClick={() => { void handleApprove() }}
-                        className="flex-1 rounded-full bg-emerald-600 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700"
-                      >
-                        ✓ Looks good, continue
-                      </button>
-                      <button
-                        type="button" onClick={() => setHitlMode('feedback')}
-                        className="flex-1 rounded-full border border-[#d7cbb7] bg-white py-2.5 text-sm font-semibold text-slate-700 transition hover:border-[#9c7a4a] hover:text-[#7b5c33]"
-                      >
-                        ✏ Refine this
-                      </button>
-                    </div>
-                  )}
-
-                  {hitlMode === 'feedback' && (
-                    <div className="mt-4 space-y-2.5">
-                      <textarea
-                        rows={3}
-                        value={feedbackText}
-                        onChange={(e) => setFeedbackText(e.target.value)}
-                        placeholder="e.g. I meant top 5 markets by category salience, not low category salience…"
-                        className="w-full resize-none rounded-2xl border border-[#d7cbb7] bg-white px-3 py-2.5 text-sm leading-6 text-slate-700 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
-                        autoFocus
-                      />
-                      <div className="flex gap-2">
-                        <button
-                          type="button" onClick={() => run('revise', feedbackText)}
-                          disabled={feedbackLoading || !feedbackText.trim()}
-                          className="flex-1 rounded-full bg-[#7b5c33] py-2 text-sm font-semibold text-white transition hover:bg-[#6c4f2a] disabled:bg-slate-300"
-                        >
-                          {feedbackLoading ? (
-                            <span className="flex items-center justify-center gap-2">
-                              <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-                              Revising…
-                            </span>
-                          ) : 'Send to Trinity →'}
-                        </button>
-                        <button
-                          type="button" onClick={() => setHitlMode('review')}
-                          className="rounded-full border border-[#d7cbb7] bg-white px-4 py-2 text-sm text-slate-500 hover:text-slate-700"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Sections: Approved banner + QA + Monte Carlo */}
-              {allRevealed && hitlMode === 'approved' && (
-                <>
-                  {/* Approved banner */}
-                  <div className="flex items-center gap-3 bg-emerald-50/50 px-5 py-4">
-                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">✓</span>
-                    <div>
-                      <p className="text-sm font-semibold text-emerald-700">Interpretation approved</p>
-                      <p className="text-xs text-slate-500 mt-0.5">{finalMarkets.length} market{finalMarkets.length !== 1 ? 's' : ''} · {interp?.is_multi_segment ? 'multi-segment plan' : `${interp?.action_direction} spend`}</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setHitlMode('review')
-                        setApprovalEvaluation(null)
-                        setApprovalError('')
-                        setScenarioHandoff(null)
-                        setScenarioHandoffError('')
-                      }}
-                      className="ml-auto rounded-full border border-[#d7cbb7] px-3 py-1 text-xs text-slate-500 hover:text-slate-700"
-                    >
-                      Revise
-                    </button>
-                  </div>
-
-                  <div className="flex flex-col">
-                  {/* QA section */}
-                  <div id="business-qa-check" className="order-2 px-5 py-5">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Business QA Check</p>
-                        <p className="mt-1 text-sm text-slate-600">This section stays separate from generated scenarios and consolidates all market reasoning into the two review buckets below.</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {approvalEvaluation ? (
-                          <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
-                            {approvalEvaluation.approved_market_count} markets
-                          </span>
-                        ) : null}
-                        <button
-                          type="button"
-                          onClick={() => setQaSectionCollapsed((prev) => !prev)}
-                          className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-[#9c7a4a] hover:text-[#7b5c33]"
-                        >
-                          {qaSectionCollapsed ? 'Expand ▼' : 'Collapse ▲'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {!qaSectionCollapsed && approvalLoading && (
-                      <div className="mt-4 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                        <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-[#7b5c33]" />
-                        <div>
-                          <p className="text-sm font-semibold text-slate-700">Checking approved actions</p>
-                          <p className="mt-0.5 text-xs text-slate-500">Looking for cases where high-elasticity markets are being cut or low-efficiency markets are being pushed.</p>
-                        </div>
-                      </div>
-                    )}
-
-                    {!qaSectionCollapsed && approvalError ? <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{approvalError}</p> : null}
-
-                    {!qaSectionCollapsed && approvalEvaluation && (
-                      <div className="mt-4 space-y-4">
-                        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                          <p className="text-sm font-semibold text-slate-900">{approvalHeadline}</p>
-                          <p className="mt-1 text-sm leading-6 text-slate-600">{approvalSummary}</p>
-                        </div>
-
-                        <div className="grid gap-3 lg:grid-cols-3">
-                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-700">Supported</p>
-                            <p className="mt-2 text-3xl font-semibold text-emerald-800">{supportedReviews.length}</p>
-                            <p className="mt-1 text-xs text-emerald-700">Actions where the economics line up with the recommendation.</p>
-                          </div>
-                          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-amber-700">Mixed</p>
-                            <p className="mt-2 text-3xl font-semibold text-amber-800">{mixedReviews.length}</p>
-                            <p className="mt-1 text-xs text-amber-700">Actions with both support and caution signals.</p>
-                          </div>
-                          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-rose-700">At Risk</p>
-                            <p className="mt-2 text-3xl font-semibold text-rose-800">{atRiskReviews.length}</p>
-                            <p className="mt-1 text-xs text-rose-700">Actions where responsiveness or salience conflicts with the recommendation.</p>
-                          </div>
-                        </div>
-
-                        <div className="grid gap-3 lg:grid-cols-2">
-                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-700">What Supports The Plan</p>
-                            <div className="mt-3 grid max-h-[34rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
-                              {supportPlanReviews.length > 0
-                                ? supportPlanReviews.map((review) => renderApprovalReasonBlock(review, 'support'))
-                                : <p className="text-sm text-emerald-800">No support signals available.</p>}
-                            </div>
-                          </div>
-                          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-rose-700">What Needs Review</p>
-                            <div className="mt-3 grid max-h-[34rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
-                              {needsReviewPlanReviews.length > 0
-                                ? needsReviewPlanReviews.map((review) => renderApprovalReasonBlock(review, 'review'))
-                                : <p className="text-sm text-rose-800">No review flags available.</p>}
-                            </div>
-                          </div>
-                        </div>
 
                         <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4">
                           <div>
@@ -2083,8 +2505,8 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                         </div>
 
                         {/* Filters + Sort */}
-                        <div ref={reachFiltersRef} className="grid gap-3 lg:grid-cols-6 rounded-2xl border border-slate-200 bg-white px-4 py-4">
-                          <div>
+                        <div ref={reachFiltersRef} className="grid gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 lg:grid-cols-12">
+                          <div className="lg:col-span-3">
                             <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Sort by</label>
                             <select value={scenarioSortKey} onChange={(e) => { setScenarioSortKey(e.target.value); setScenarioPage(1) }}
                               className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700">
@@ -2093,29 +2515,37 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                               <option value="balanced_score">Balanced score</option>
                             </select>
                           </div>
-                          <div>
+                          <div className="lg:col-span-3">
                             <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Min Volume Uplift %</label>
                             <input type="number" step="0.01" value={scenarioMinVolumePct}
                               onChange={(e) => { setScenarioMinVolumePct(e.target.value); setScenarioPage(1) }}
                               className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
                               placeholder="e.g. 2.0" />
                           </div>
-                          <div>
+                          <div className="lg:col-span-3">
                             <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Min Revenue Uplift %</label>
                             <input type="number" step="0.01" value={scenarioMinRevenuePct}
                               onChange={(e) => { setScenarioMinRevenuePct(e.target.value); setScenarioPage(1) }}
                               className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
                               placeholder="e.g. 2.5" />
                           </div>
-                          <div>
+                          <div className="lg:col-span-3">
                             <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Max Budget Utilized %</label>
                             <input type="number" step="0.01" value={scenarioMaxBudgetUtilizedPctFilter}
                               onChange={(e) => { setScenarioMaxBudgetUtilizedPctFilter(e.target.value); setScenarioPage(1) }}
                               className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
                               placeholder="e.g. 100" />
                           </div>
-                          {scenarioReachFilters.map((filter, index) => (
-                            <div key={`reach-filter-${index}`} className="relative rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3">
+                          <div className="lg:col-span-12">
+                            {renderMarketControlPanel(
+                              scenarioReachFilters,
+                              setScenarioReachFilter,
+                              scenarioResults?.summary.selected_markets ?? markets,
+                              'main',
+                            )}
+                          </div>
+                          {false && scenarioReachFilters.map((filter, index) => (
+                            <div key={`reach-filter-${index}`} className="relative rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 lg:col-span-6">
                               <div className="flex items-center justify-between gap-2">
                                 <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
                                   Reach Share Filter {index + 1}
@@ -2182,7 +2612,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                               ) : null}
                               <select
                                 value={filter.direction}
-                                onChange={(e) => setScenarioReachFilter(index, { direction: e.target.value as 'higher' | 'lower' })}
+                                onChange={(e) => setScenarioReachFilter(index, { direction: e.target.value as 'higher' | 'lower' | 'equal' })}
                                 disabled={!filter.markets.length}
                                 className="mt-3 w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm disabled:bg-slate-100 disabled:text-slate-400"
                               >
@@ -2226,7 +2656,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                               >
                                 <div className="mb-4">
                                   <div className="flex items-center justify-between gap-2">
-                                    <p className="text-sm font-semibold text-slate-900">{item.scenario_id}</p>
+                                    <p className="text-sm font-semibold text-slate-900">{scenarioDisplayName(item)}</p>
                                     <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-600">{item.family}</span>
                                   </div>
                                 </div>
@@ -2293,7 +2723,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
               )}
 
               </div>
-              )}
             </div>
           )}
 
@@ -2377,6 +2806,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
               {scenarioError ? <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{scenarioError}</p> : null}
 
               {scenarioResults && (
+                <>
                 <div className="mt-4 space-y-4">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-semibold text-emerald-700">{scenarioResults!.summary.scenario_count.toLocaleString()} scenarios</span>
@@ -2391,8 +2821,8 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                     </button>
                   </div>
 
-                  <div className="grid gap-3 lg:grid-cols-6 rounded-2xl border border-slate-200 bg-white px-4 py-4">
-                    <div>
+                  <div ref={reachFiltersRef} className="grid gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 lg:grid-cols-12">
+                    <div className="lg:col-span-3">
                       <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Sort by</label>
                       <select value={scenarioSortKey} onChange={(e) => { setScenarioSortKey(e.target.value); setScenarioPage(1) }}
                         className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700">
@@ -2401,27 +2831,118 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                         <option value="balanced_score">Balanced score</option>
                       </select>
                     </div>
-                    <div>
+                    <div className="lg:col-span-3">
                       <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Min Volume Uplift %</label>
                       <input type="number" step="0.01" value={scenarioMinVolumePct}
                         onChange={(e) => { setScenarioMinVolumePct(e.target.value); setScenarioPage(1) }}
                         className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
                         placeholder="e.g. 2.0" />
                     </div>
-                    <div>
+                    <div className="lg:col-span-3">
                       <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Min Revenue Uplift %</label>
                       <input type="number" step="0.01" value={scenarioMinRevenuePct}
                         onChange={(e) => { setScenarioMinRevenuePct(e.target.value); setScenarioPage(1) }}
                         className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
                         placeholder="e.g. 2.5" />
                     </div>
-                    <div>
+                    <div className="lg:col-span-3">
                       <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Max Budget Utilized %</label>
                       <input type="number" step="0.01" value={scenarioMaxBudgetUtilizedPctFilter}
                         onChange={(e) => { setScenarioMaxBudgetUtilizedPctFilter(e.target.value); setScenarioPage(1) }}
                         className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
                         placeholder="e.g. 100" />
                     </div>
+                    <div className="lg:col-span-12">
+                      {renderMarketControlPanel(
+                        scenarioReachFilters,
+                        setScenarioReachFilter,
+                        scenarioResults?.summary.selected_markets ?? markets,
+                        'main2',
+                      )}
+                    </div>
+                    {false && scenarioReachFilters.map((filter, index) => {
+                      const otherFilter = scenarioReachFilters[index === 0 ? 1 : 0]
+                      const availableMarkets = (scenarioResults?.summary.selected_markets ?? markets).filter(
+                        (m) => !otherFilter.markets.includes(m)
+                      )
+                      return (
+                      <div key={`reach-filter-${index}`} className="relative rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 lg:col-span-6">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+                            Reach Share Filter {index + 1}
+                          </label>
+                          {filter.markets.length ? (
+                            <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-600">
+                              {filter.markets.length} selected
+                            </span>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setOpenReachFilterIndex((prev) => (prev === index ? null : index))}
+                          className="mt-3 flex w-full items-center justify-between rounded-2xl border border-slate-300 bg-white px-3 py-2.5 text-left text-sm text-slate-700 shadow-sm transition hover:border-[#9c7a4a]"
+                        >
+                          <span className="truncate pr-3">
+                            {filter.markets.length > 0 ? `${filter.markets.length} market${filter.markets.length !== 1 ? 's' : ''} selected` : 'Select markets'}
+                          </span>
+                          <span className="text-xs text-slate-400">{openReachFilterIndex === index ? '▲' : '▼'}</span>
+                        </button>
+                        {openReachFilterIndex === index ? (
+                          <div className="absolute left-3 right-3 top-[5.5rem] z-20 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                            <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+                              {availableMarkets.map((market) => {
+                                const selected = filter.markets.includes(market)
+                                return (
+                                  <label
+                                    key={`reach-filter-${index}-${market}`}
+                                    className={`flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2 text-sm transition ${selected ? 'bg-[#f4ece0] text-[#7b5c33]' : 'hover:bg-slate-50 text-slate-700'}`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={selected}
+                                      onChange={(e) => {
+                                        const nextMarkets = e.target.checked
+                                          ? [...filter.markets, market]
+                                          : filter.markets.filter((item) => item !== market)
+                                        setScenarioReachFilter(index, { markets: nextMarkets })
+                                      }}
+                                      className="h-4 w-4 rounded border-slate-300 text-[#7b5c33] focus:ring-[#c9b79b]"
+                                    />
+                                    <span className="flex-1">{market}</span>
+                                  </label>
+                                )
+                              })}
+                            </div>
+                            <div className="mt-2 flex items-center justify-between gap-2 border-t border-slate-100 px-2 pt-2">
+                              <button
+                                type="button"
+                                onClick={() => setScenarioReachFilter(index, { markets: [] })}
+                                className="text-xs font-semibold text-slate-500 transition hover:text-rose-600"
+                              >
+                                Clear
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setOpenReachFilterIndex(null)}
+                                className="rounded-full bg-[#7b5c33] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[#6c4f2a]"
+                              >
+                                Done
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                        <select
+                          value={filter.direction}
+                          onChange={(e) => setScenarioReachFilter(index, { direction: e.target.value as 'higher' | 'lower' | 'equal' })}
+                          disabled={!filter.markets.length}
+                          className="mt-3 w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm disabled:bg-slate-100 disabled:text-slate-400"
+                        >
+                          <option value="higher">Higher than last year</option>
+                          <option value="lower">Lower than last year</option>
+                        </select>
+                      </div>
+                      )
+                    })}
                   </div>
 
                   <div className="px-1 py-2">
@@ -2442,49 +2963,62 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       const revColor = item.revenue_uplift_pct >= 0 ? 'bg-blue-500' : 'bg-rose-400'
                       const budColor = budgetPct > 100 ? 'bg-rose-400' : budgetPct > 90 ? 'bg-amber-400' : 'bg-slate-400'
                       return (
-                        <button
+                        <div
                           key={item.scenario_id}
-                          type="button"
-                          onClick={() => {
-                            setScenarioModal(item)
-                            setScenarioModalSplitView('reach')
-                            setScenarioModalSortBy('budget_delta')
-                            setScenarioModalChangeFilter('all')
-                            setScenarioPlanMessage('')
-                          }}
-                          className="rounded-2xl border border-slate-200 bg-white px-4 py-4 text-left transition hover:border-[#9c7a4a] hover:shadow-md"
+                          className="flex flex-col rounded-2xl border border-slate-200 bg-white transition hover:border-[#9c7a4a] hover:shadow-md"
                         >
-                          <div className="mb-4">
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="text-sm font-semibold text-slate-900">{item.scenario_id}</p>
-                              <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-600">{item.family}</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setScenarioModal(item)
+                              setScenarioModalSplitView('reach')
+                              setScenarioModalSortBy('budget_delta')
+                              setScenarioModalChangeFilter('all')
+                              setScenarioPlanMessage('')
+                            }}
+                            className="flex-1 px-4 pt-4 pb-2 text-left"
+                          >
+                            <div className="mb-4">
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-sm font-semibold text-slate-900">{scenarioDisplayName(item)}</p>
+                                <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-600">{item.family}</span>
+                              </div>
                             </div>
+                            <div className="relative grid h-44 grid-cols-3 gap-4">
+                              <div className="pointer-events-none absolute inset-x-0 bottom-9 border-t border-slate-200" />
+                              <div className="flex flex-col items-center">
+                                <div className="relative h-32 w-full">
+                                  <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${volColor}`} style={{ height: `${volBarH <= 0 ? 0 : Math.max(8, volBarH)}%` }} />
+                                </div>
+                                <span className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Volume</span>
+                                <span className="text-[11px] font-semibold tabular-nums text-slate-700">{formatSignedPct(item.volume_uplift_pct, 1)}</span>
+                              </div>
+                              <div className="flex flex-col items-center">
+                                <div className="relative h-32 w-full">
+                                  <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${revColor}`} style={{ height: `${revBarH <= 0 ? 0 : Math.max(8, revBarH)}%` }} />
+                                </div>
+                                <span className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Revenue</span>
+                                <span className="text-[11px] font-semibold tabular-nums text-slate-700">{formatSignedPct(item.revenue_uplift_pct, 1)}</span>
+                              </div>
+                              <div className="flex flex-col items-center">
+                                <div className="relative h-32 w-full">
+                                  <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${budColor}`} style={{ height: `${budBarH <= 0 ? 0 : Math.max(2, budBarH)}%` }} />
+                                </div>
+                                <span className="mt-3 text-center text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Budget Used</span>
+                                <span className="mt-0.5 text-[12px] font-semibold tabular-nums text-slate-800">{formatMetric(budgetPct, 0)}%</span>
+                              </div>
+                            </div>
+                          </button>
+                          <div className="border-t border-slate-100 px-4 py-2">
+                            <button
+                              type="button"
+                              onClick={() => openZoomModal(item)}
+                              className="w-full rounded-full bg-[#f5ede0] py-1 text-[11px] font-semibold text-[#7b5c33] transition hover:bg-[#ede0cc] disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              Generate 1,000 near this →
+                            </button>
                           </div>
-                          <div className="relative grid h-44 grid-cols-3 gap-4">
-                            <div className="pointer-events-none absolute inset-x-0 bottom-9 border-t border-slate-200" />
-                            <div className="flex flex-col items-center">
-                              <div className="relative h-32 w-full">
-                                <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${volColor}`} style={{ height: `${volBarH <= 0 ? 0 : Math.max(8, volBarH)}%` }} />
-                              </div>
-                              <span className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Volume</span>
-                              <span className="text-[11px] font-semibold tabular-nums text-slate-700">{formatSignedPct(item.volume_uplift_pct, 1)}</span>
-                            </div>
-                            <div className="flex flex-col items-center">
-                              <div className="relative h-32 w-full">
-                                <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${revColor}`} style={{ height: `${revBarH <= 0 ? 0 : Math.max(8, revBarH)}%` }} />
-                              </div>
-                              <span className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Revenue</span>
-                              <span className="text-[11px] font-semibold tabular-nums text-slate-700">{formatSignedPct(item.revenue_uplift_pct, 1)}</span>
-                            </div>
-                            <div className="flex flex-col items-center">
-                              <div className="relative h-32 w-full">
-                                <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${budColor}`} style={{ height: `${budBarH <= 0 ? 0 : Math.max(2, budBarH)}%` }} />
-                              </div>
-                              <span className="mt-3 text-center text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Budget Used</span>
-                              <span className="mt-0.5 text-[12px] font-semibold tabular-nums text-slate-800">{formatMetric(budgetPct, 0)}%</span>
-                            </div>
-                          </div>
-                        </button>
+                        </div>
                       )
                     })}
                   </div>
@@ -2514,11 +3048,433 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                     </div>
                   </div>
                 </div>
+
+                {/* Zoom config strip — always shown when results are loaded */}
+                <div className="hidden mt-6 rounded-2xl border border-[#ede4d6] bg-[#fdf8f2] px-5 py-4">
+                  <p className="mb-3 text-[11px] font-bold uppercase tracking-widest text-[#7b5c33]">Explore Near a Scenario</p>
+                  <div className="flex flex-wrap items-end gap-4">
+                    <div>
+                      <label className="mb-1 block text-[11px] font-semibold text-slate-500">Band (±%)</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={50}
+                        value={zoomBandPct}
+                        onChange={(e) => setZoomBandPct(Math.max(1, Math.min(50, Number(e.target.value))))}
+                        className="w-20 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-[#9c7a4a]/40"
+                      />
+                    </div>
+                    <div className="flex-1">
+                      <label className="mb-1 block text-[11px] font-semibold text-slate-500">Additional prompt (optional — uses AI to adjust strategy)</label>
+                      <input
+                        type="text"
+                        placeholder="e.g. favour markets with higher reach share growth"
+                        value={zoomPrompt}
+                        onChange={(e) => setZoomPrompt(e.target.value)}
+                        className="w-full rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#9c7a4a]/40"
+                      />
+                    </div>
+                  </div>
+                  <p className="mt-2 text-[11px] text-slate-400">Click <span className="font-semibold text-[#7b5c33]">Explore 1,000 near this →</span> on any scenario card above to generate 1,000 scenarios tightly clustered around that plan's total budget.</p>
+                </div>
+
+              {/* Zoom results */}
+              {false && zoomAnchor && (zoomLoading || zoomStatus !== 'idle') && (
+                <div className="mt-6 rounded-2xl border border-slate-200 bg-white px-5 py-5">
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900">Zoom: 1,000 scenarios near {scenarioDisplayName(zoomAnchor!)}</p>
+                      <p className="mt-0.5 text-xs text-slate-500">Budget band ±{zoomBandPct}% around {scenarioDisplayName(zoomAnchor!)}'s total spend{zoomPrompt.trim() ? ' · with AI prompt refinement' : ''}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => { setZoomAnchor(null); setZoomStatus('idle'); setZoomResults(null); setZoomError(''); setZoomJobId('') }}
+                      className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-500 transition hover:border-slate-400"
+                    >
+                      Clear
+                    </button>
+                  </div>
+
+                  {zoomError && (
+                    <p className="rounded-lg bg-rose-50 px-4 py-3 text-sm text-rose-600">{zoomError}</p>
+                  )}
+
+                  {(zoomStatus === 'queued' || zoomStatus === 'running') && !zoomError && (
+                    <div className="flex items-center gap-3 py-4">
+                      <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#9c7a4a] border-t-transparent" />
+                      <p className="text-sm text-slate-500">{zoomMessage || 'Generating zoom scenarios…'} {zoomProgress > 0 && `(${Math.round(zoomProgress)}%)`}</p>
+                    </div>
+                  )}
+
+                  {zoomStatus === 'completed' && zoomResults && (
+                    <>
+                      <div className="mb-4 flex items-center justify-between">
+                        <p className="text-xs text-slate-500">{zoomResults!.pagination.total_count.toLocaleString()} zoom scenarios · click any card for market breakdown</p>
+                      </div>
+                      <div className="grid gap-4 lg:grid-cols-5">
+                        {zoomResults!.items.map((item) => {
+                          const zBudgetPct = scenarioBudgetUtilizedPct(item)
+                          const zVolH = Math.max(0, Math.min(100, Math.abs(item.volume_uplift_pct) * 6.5))
+                          const zRevH = Math.max(0, Math.min(100, Math.abs(item.revenue_uplift_pct) * 6.5))
+                          const zBudH = Math.max(0, Math.min(100, ((zBudgetPct - 80) / 40) * 100))
+                          const zVol = item.volume_uplift_pct >= 0 ? 'bg-emerald-500' : 'bg-rose-400'
+                          const zRev = item.revenue_uplift_pct >= 0 ? 'bg-blue-500' : 'bg-rose-400'
+                          const zBud = zBudgetPct > 100 ? 'bg-rose-400' : zBudgetPct > 90 ? 'bg-amber-400' : 'bg-slate-400'
+                          return (
+                            <button
+                              key={item.scenario_id}
+                              type="button"
+                              onClick={() => { setScenarioModal(item); setScenarioModalSplitView('reach'); setScenarioModalSortBy('budget_delta'); setScenarioModalChangeFilter('all'); setScenarioPlanMessage('') }}
+                              className="rounded-2xl border border-slate-200 bg-white px-4 py-4 text-left transition hover:border-[#9c7a4a] hover:shadow-md"
+                            >
+                              <div className="mb-4 flex items-center justify-between gap-2">
+                                <p className="text-sm font-semibold text-slate-900">{scenarioDisplayName(item)}</p>
+                                <span className="rounded-full bg-[#f5ede0] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#7b5c33]">{item.family}</span>
+                              </div>
+                              <div className="relative grid h-44 grid-cols-3 gap-4">
+                                <div className="pointer-events-none absolute inset-x-0 bottom-9 border-t border-slate-200" />
+                                <div className="flex flex-col items-center">
+                                  <div className="relative h-32 w-full">
+                                    <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${zVol}`} style={{ height: `${zVolH <= 0 ? 0 : Math.max(8, zVolH)}%` }} />
+                                  </div>
+                                  <span className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Volume</span>
+                                  <span className="text-[11px] font-semibold text-slate-700">{formatSignedPct(item.volume_uplift_pct, 1)}</span>
+                                </div>
+                                <div className="flex flex-col items-center">
+                                  <div className="relative h-32 w-full">
+                                    <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${zRev}`} style={{ height: `${zRevH <= 0 ? 0 : Math.max(8, zRevH)}%` }} />
+                                  </div>
+                                  <span className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Revenue</span>
+                                  <span className="text-[11px] font-semibold text-slate-700">{formatSignedPct(item.revenue_uplift_pct, 1)}</span>
+                                </div>
+                                <div className="flex flex-col items-center">
+                                  <div className="relative h-32 w-full">
+                                    <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${zBud}`} style={{ height: `${zBudH <= 0 ? 0 : Math.max(2, zBudH)}%` }} />
+                                  </div>
+                                  <span className="mt-3 text-center text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Budget Used</span>
+                                  <span className="mt-0.5 text-[12px] font-semibold text-slate-800">{formatMetric(zBudgetPct, 0)}%</span>
+                                </div>
+                              </div>
+                            </button>
+                          )
+                        })}
+                      </div>
+                      <div className="mt-4 flex items-center justify-between gap-3">
+                        <p className="text-xs text-slate-500">Page {zoomResults!.pagination.page} of {Math.max(1, zoomResults!.pagination.total_pages)}</p>
+                        <div className="flex gap-2">
+                          <button type="button" onClick={() => setZoomPage((p) => Math.max(1, p - 1))} disabled={zoomResults!.pagination.page <= 1} className="rounded-full border border-slate-300 bg-white px-4 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-40">Previous</button>
+                          <button type="button" onClick={() => setZoomPage((p) => Math.min(Math.max(1, zoomResults!.pagination.total_pages), p + 1))} disabled={zoomResults!.pagination.page >= Math.max(1, zoomResults!.pagination.total_pages)} className="rounded-full border border-slate-300 bg-white px-4 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-40">Next</button>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
               )}
+              </>
+            )}
             </div>
           )}
         </div>
       )}
+
+      {zoomAnchor && (() => {
+        const zoomBandLower = zoomAnchor.total_new_spend * (1 - zoomBandPct / 100)
+        const zoomBandUpper = zoomAnchor.total_new_spend * (1 + zoomBandPct / 100)
+        const zoomSelectedMarkets = zoomResults?.summary.selected_markets ?? scenarioResults?.summary.selected_markets ?? markets
+        return (
+          <div ref={zoomPanelRef} className="mt-6 rounded-[28px] border border-[#d8c8ae] bg-white shadow-[0_20px_60px_rgba(123,92,51,0.12)]">
+            <div className="border-b border-slate-100 bg-white px-8 pb-5 pt-6">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-lg font-bold text-slate-900">Generate 1,000 near {scenarioDisplayName(zoomAnchor)}</p>
+                      <span className="rounded-full bg-[#f5ede0] px-2.5 py-0.5 text-[11px] font-semibold text-[#7b5c33]">{zoomAnchor.family}</span>
+                    </div>
+                    <p className="mt-2 text-sm text-slate-600">Set a tighter budget band, add an optional prompt refinement, then generate and filter the nearby scenario cluster below the 5,000-scenario section.</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">Anchor spend {formatBudgetValue(zoomAnchor.total_new_spend)}</span>
+                      <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">Vol {formatSignedPct(zoomAnchor.volume_uplift_pct, 2)}</span>
+                      <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700">Rev {formatSignedPct(zoomAnchor.revenue_uplift_pct, 2)}</span>
+                    </div>
+                    <p className="mt-3 text-xs text-slate-500">Select another scenario card above at any time to replace this unsaved 1,000-scenario run with a new anchor.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => closeZoomModal()}
+                    className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-500 transition hover:border-slate-400 hover:text-slate-700"
+                  >
+                    Clear
+                  </button>
+                </div>
+            </div>
+
+            <div className="space-y-6 px-8 py-6">
+                <div className="grid gap-4 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,0.8fr)]">
+                  <div className="rounded-3xl border border-slate-200 bg-[#fcfaf7] p-5">
+                    <div className="grid gap-4 lg:grid-cols-[200px_minmax(0,1fr)]">
+                      <div>
+                        <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Band (+/- %)</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={50}
+                          value={zoomBandPct}
+                          onChange={(e) => setZoomBandPct(Math.max(1, Math.min(50, Number(e.target.value))))}
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+                        />
+                        <p className="mt-2 text-xs text-slate-500">Budget range {formatBudgetValue(zoomBandLower)} to {formatBudgetValue(zoomBandUpper)}</p>
+                      </div>
+                      <div>
+                        <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Additional Prompt</label>
+                        <textarea
+                          rows={3}
+                          placeholder="e.g. favour markets with higher reach share growth"
+                          value={zoomPrompt}
+                          onChange={(e) => setZoomPrompt(e.target.value)}
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 placeholder:text-slate-400"
+                        />
+                        <p className="mt-2 text-xs text-slate-500">When provided, this prompt revises the approved strategy before generating the nearby 1,000 scenarios.</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-3xl border border-[#e6dccd] bg-[#fdf8f2] p-5">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-[#8c7554]">Generation Scope</p>
+                    <div className="mt-3 space-y-3">
+                      <div className="rounded-2xl border border-white/80 bg-white px-4 py-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Target</p>
+                        <p className="mt-1 text-xl font-semibold text-slate-900">1,000 scenarios</p>
+                      </div>
+                      <div className="rounded-2xl border border-white/80 bg-white px-4 py-3">
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Selected Markets</p>
+                        <p className="mt-1 text-sm font-semibold text-slate-900">{zoomSelectedMarkets.length}</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void startZoomGeneration(zoomAnchor)}
+                      disabled={zoomGenerationActive}
+                      className="mt-4 w-full rounded-full bg-[#7b5c33] px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-[#6c4f2a] disabled:cursor-not-allowed disabled:bg-slate-300"
+                    >
+                      {zoomGenerationActive ? 'Generating...' : 'Generate 1,000 scenarios'}
+                    </button>
+                  </div>
+                </div>
+
+                {zoomError ? (
+                  <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600">{zoomError}</p>
+                ) : null}
+
+                {zoomGenerationActive ? (
+                  <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-slate-800">{zoomMessage || 'Generating zoom scenarios...'}</p>
+                      <span className="text-sm font-semibold text-slate-500">{Math.round(zoomProgress)}%</span>
+                    </div>
+                    <div className="mt-3 h-2 w-full rounded-full bg-slate-100">
+                      <div className="h-2 rounded-full bg-[#7b5c33] transition-all" style={{ width: `${Math.max(4, zoomProgress)}%` }} />
+                    </div>
+                  </div>
+                ) : null}
+
+                {zoomResults ? (
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-[11px] font-semibold text-emerald-700">{zoomResults.summary.scenario_count.toLocaleString()} scenarios</span>
+                      <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">Budget {formatBudgetValue(zoomResults.summary.target_budget)}</span>
+                      <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">{zoomResults.summary.selected_markets.length} markets</span>
+                    </div>
+
+                    <div ref={zoomReachFiltersRef} className="grid gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 lg:grid-cols-12">
+                      <div className="lg:col-span-3">
+                        <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Sort by</label>
+                        <select
+                          value={zoomSortKey}
+                          onChange={(e) => { setZoomSortKey(e.target.value); setZoomPage(1) }}
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+                        >
+                          <option value="balanced_score">Balanced score</option>
+                          <option value="revenue_uplift_pct">Revenue uplift</option>
+                          <option value="volume_uplift_pct">Volume uplift</option>
+                        </select>
+                      </div>
+                      <div className="lg:col-span-3">
+                        <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Min Volume Uplift %</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={zoomMinVolumePct}
+                          onChange={(e) => { setZoomMinVolumePct(e.target.value); setZoomPage(1) }}
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+                          placeholder="e.g. 2.0"
+                        />
+                      </div>
+                      <div className="lg:col-span-3">
+                        <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Min Revenue Uplift %</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={zoomMinRevenuePct}
+                          onChange={(e) => { setZoomMinRevenuePct(e.target.value); setZoomPage(1) }}
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+                          placeholder="e.g. 2.5"
+                        />
+                      </div>
+                      <div className="lg:col-span-3">
+                        <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Max Budget Utilized %</label>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={zoomMaxBudgetUtilizedPctFilter}
+                          onChange={(e) => { setZoomMaxBudgetUtilizedPctFilter(e.target.value); setZoomPage(1) }}
+                          className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+                          placeholder="e.g. 100"
+                        />
+                      </div>
+                      {zoomReachFilters.map((filter, index) => {
+                        const otherFilter = zoomReachFilters[index === 0 ? 1 : 0]
+                        const availableMarkets = zoomSelectedMarkets.filter((market) => !otherFilter.markets.includes(market))
+                        return (
+                          <div key={`zoom-reach-filter-${index}`} className="relative rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 lg:col-span-6">
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Reach Share Filter {index + 1}</label>
+                              {filter.markets.length ? (
+                                <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-600">{filter.markets.length} selected</span>
+                              ) : null}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setOpenZoomReachFilterIndex((prev) => (prev === index ? null : index))}
+                              className="mt-3 flex w-full items-center justify-between rounded-2xl border border-slate-300 bg-white px-3 py-2.5 text-left text-sm text-slate-700 shadow-sm transition hover:border-[#9c7a4a]"
+                            >
+                              <span className="truncate pr-3">
+                                {filter.markets.length > 0 ? `${filter.markets.length} market${filter.markets.length !== 1 ? 's' : ''} selected` : 'Select markets'}
+                              </span>
+                              <span className="text-xs text-slate-400">{openZoomReachFilterIndex === index ? '^' : 'v'}</span>
+                            </button>
+                            {openZoomReachFilterIndex === index ? (
+                              <div className="absolute left-3 right-3 top-[5.5rem] z-20 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                                <div className="max-h-56 space-y-1 overflow-y-auto pr-1">
+                                  {availableMarkets.map((market) => {
+                                    const selected = filter.markets.includes(market)
+                                    return (
+                                      <label
+                                        key={`zoom-reach-filter-${index}-${market}`}
+                                        className={`flex cursor-pointer items-center gap-3 rounded-xl px-3 py-2 text-sm transition ${selected ? 'bg-[#f4ece0] text-[#7b5c33]' : 'text-slate-700 hover:bg-slate-50'}`}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          checked={selected}
+                                          onChange={(e) => {
+                                            const nextMarkets = e.target.checked
+                                              ? [...filter.markets, market]
+                                              : filter.markets.filter((item) => item !== market)
+                                            setZoomReachFilter(index, { markets: nextMarkets })
+                                          }}
+                                          className="h-4 w-4 rounded border-slate-300 text-[#7b5c33] focus:ring-[#9c7a4a]"
+                                        />
+                                        <span className="truncate">{market}</span>
+                                      </label>
+                                    )
+                                  })}
+                                </div>
+                              </div>
+                            ) : null}
+                            <select
+                              value={filter.direction}
+                              onChange={(e) => setZoomReachFilter(index, { direction: e.target.value as 'higher' | 'lower' | 'equal' })}
+                              disabled={!filter.markets.length}
+                              className="mt-3 w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm disabled:bg-slate-100 disabled:text-slate-400"
+                            >
+                              <option value="higher">Higher than last year</option>
+                              <option value="lower">Lower than last year</option>
+                            </select>
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    <div className="grid gap-4 lg:grid-cols-5">
+                      {zoomResults.items.map((item) => {
+                        const zBudgetPct = scenarioBudgetUtilizedPct(item)
+                        const zVolH = Math.max(0, Math.min(100, Math.abs(item.volume_uplift_pct) * 6.5))
+                        const zRevH = Math.max(0, Math.min(100, Math.abs(item.revenue_uplift_pct) * 6.5))
+                        const zBudH = Math.max(0, Math.min(100, ((zBudgetPct - 80) / 40) * 100))
+                        const zVol = item.volume_uplift_pct >= 0 ? 'bg-emerald-500' : 'bg-rose-400'
+                        const zRev = item.revenue_uplift_pct >= 0 ? 'bg-blue-500' : 'bg-rose-400'
+                        const zBud = zBudgetPct > 100 ? 'bg-rose-400' : zBudgetPct > 90 ? 'bg-amber-400' : 'bg-slate-400'
+                        return (
+                          <button
+                            key={item.scenario_id}
+                            type="button"
+                            onClick={() => { setScenarioModal(item); setScenarioModalSplitView('reach'); setScenarioModalSortBy('budget_delta'); setScenarioModalChangeFilter('all'); setScenarioPlanMessage('') }}
+                            className="rounded-2xl border border-slate-200 bg-white px-4 py-4 text-left transition hover:border-[#9c7a4a] hover:shadow-md"
+                          >
+                            <div className="mb-4 flex items-center justify-between gap-2">
+                              <p className="text-sm font-semibold text-slate-900">{scenarioDisplayName(item)}</p>
+                              <span className="rounded-full bg-[#f5ede0] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#7b5c33]">{item.family}</span>
+                            </div>
+                            <div className="relative grid h-44 grid-cols-3 gap-4">
+                              <div className="pointer-events-none absolute inset-x-0 bottom-9 border-t border-slate-200" />
+                              <div className="flex flex-col items-center">
+                                <div className="relative h-32 w-full">
+                                  <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${zVol}`} style={{ height: `${zVolH <= 0 ? 0 : Math.max(8, zVolH)}%` }} />
+                                </div>
+                                <span className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Volume</span>
+                                <span className="text-[11px] font-semibold text-slate-700">{formatSignedPct(item.volume_uplift_pct, 1)}</span>
+                              </div>
+                              <div className="flex flex-col items-center">
+                                <div className="relative h-32 w-full">
+                                  <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${zRev}`} style={{ height: `${zRevH <= 0 ? 0 : Math.max(8, zRevH)}%` }} />
+                                </div>
+                                <span className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Revenue</span>
+                                <span className="text-[11px] font-semibold text-slate-700">{formatSignedPct(item.revenue_uplift_pct, 1)}</span>
+                              </div>
+                              <div className="flex flex-col items-center">
+                                <div className="relative h-32 w-full">
+                                  <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${zBud}`} style={{ height: `${zBudH <= 0 ? 0 : Math.max(2, zBudH)}%` }} />
+                                </div>
+                                <span className="mt-3 text-center text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Budget Used</span>
+                                <span className="mt-0.5 text-[12px] font-semibold text-slate-800">{formatMetric(zBudgetPct, 0)}%</span>
+                              </div>
+                            </div>
+                          </button>
+                        )
+                      })}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs text-slate-500">Page {zoomResults.pagination.page} of {Math.max(1, zoomResults.pagination.total_pages)} · {zoomResults.pagination.total_count.toLocaleString()} total</p>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setZoomPage((p) => Math.max(1, p - 1))}
+                          disabled={zoomResults.pagination.page <= 1}
+                          className="rounded-full border border-slate-300 bg-white px-4 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Previous
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setZoomPage((p) => Math.min(Math.max(1, zoomResults.pagination.total_pages), p + 1))}
+                          disabled={zoomResults.pagination.page >= Math.max(1, zoomResults.pagination.total_pages)}
+                          className="rounded-full border border-slate-300 bg-white px-4 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          Next
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : !zoomGenerationActive ? (
+                  <div className="rounded-2xl border border-dashed border-[#d7cbb7] bg-[#fcfaf7] px-5 py-8 text-center">
+                    <p className="text-sm font-semibold text-slate-800">No nearby scenarios generated yet.</p>
+                    <p className="mt-2 text-sm text-slate-500">Set the band and optional prompt above, then run the 1,000-scenario generation from this panel.</p>
+                  </div>
+                ) : null}
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Scenario detail modal */}
       {scenarioModal && (() => {
@@ -2598,7 +3554,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <div className="flex items-center gap-2">
-                      <p className="text-lg font-bold text-slate-900">{scenarioModal.scenario_id}</p>
+                      <p className="text-lg font-bold text-slate-900">{scenarioDisplayName(scenarioModal)}</p>
                       <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600">{scenarioModal.family}</span>
                     </div>
                     <p className="mt-2 text-sm text-slate-600">
@@ -2704,7 +3660,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                           >
                             <option value="budget_delta">Budget change</option>
                             <option value="brand_salience">Brand salience</option>
-                            <option value="market_share_change">Market share trend</option>
+                            <option value="market_share_change">Market share</option>
                           </select>
                         </label>
                         <label className="rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2">
@@ -2749,7 +3705,12 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                             budgetText: 'text-rose-900',
                           }
                       return (
-                        <div key={`${row.market}-${scenarioModalSplitView}`} className={`grid grid-cols-[minmax(220px,1.4fr)_120px_120px_140px_140px] gap-3 border-b px-2 py-3 text-sm last:border-b-0 ${tone.rowBg} ${tone.border}`}>
+                        <button
+                          type="button"
+                          key={`${row.market}-${scenarioModalSplitView}`}
+                          onClick={() => setScenarioMarketDetailRow(row)}
+                          className={`w-full grid grid-cols-[minmax(220px,1.4fr)_120px_120px_140px_140px] gap-3 border-b px-2 py-3 text-sm last:border-b-0 text-left transition hover:brightness-95 cursor-pointer ${tone.rowBg} ${tone.border}`}
+                        >
                           <div>
                             <div className="flex flex-wrap items-center gap-2">
                               <p className="font-semibold text-slate-900">{row.market}</p>
@@ -2782,7 +3743,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                             <p className={`font-semibold tabular-nums ${tone.budgetText}`}>{formatCompactBudgetValue(row.new_total_spend)}</p>
                             <p className="mt-0.5 text-[10px] text-slate-400">{formatBudgetValue(row.new_total_spend)}</p>
                           </div>
-                        </div>
+                        </button>
                       )
                     }) : (
                       <div className="py-6 text-sm text-slate-500">No states match the current filter.</div>
@@ -2790,6 +3751,295 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                     </div>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
+      {/* TV / Digital split detail sub-modal */}
+      {scenarioMarketDetailRow && (() => {
+        const r = scenarioMarketDetailRow
+        const activeCurvePoints = modalSCurveChannel === 'tv' ? (modalSCurveData?.tv ?? []) : (modalSCurveData?.digital ?? [])
+        const baselineReach = modalSCurveChannel === 'tv' ? modalSCurveData?.baseline_tv_reach : modalSCurveData?.baseline_digital_reach
+        const xKey = modalSCurveChannel === 'tv' ? 'tv_reach' : 'digital_reach'
+        const curveColor = modalSCurveChannel === 'tv' ? '#3b82f6' : '#a855f7'
+        // New allocation reach: prefer direct field, fallback to spend ÷ CPR
+        const newReach = modalSCurveChannel === 'tv'
+          ? (Number(r.new_annual_tv_reach ?? 0) || (Number(r.new_total_tv_spend ?? 0) / Math.max(1e-9, Number(r.tv_cpr ?? 1))))
+          : (Number(r.new_annual_digital_reach ?? 0) || (Number(r.new_total_digital_spend ?? 0) / Math.max(1e-9, Number(r.digital_cpr ?? 1))))
+
+        const getPointX = (p: ModalSCurvePoint) => {
+          const raw = xKey === 'tv_reach' ? p.tv_reach : p.digital_reach
+          if (raw != null && Number.isFinite(raw) && Number(raw) > 0) return Number(raw)
+          const base = Number(baselineReach)
+          if (Number.isFinite(base) && base > 0) return base * Number(p.scale)
+          return 0
+        }
+
+        const renderSCurveChart = () => {
+          if (modalSCurveLoading) return (
+            <div className="flex items-center justify-center py-10 text-slate-400 text-sm gap-2">
+              <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-blue-500" />
+              Loading S-curve…
+            </div>
+          )
+          if (modalSCurveError) return <p className="py-6 text-center text-sm text-rose-600">{modalSCurveError}</p>
+          if (!modalSCurveData || activeCurvePoints.length === 0) return (
+            <p className="py-6 text-center text-sm text-slate-400">No curve data available.</p>
+          )
+          const W = 520, H = 220, L = 44, R = 12, T = 12, B = 52
+          const pw = W - L - R, ph = H - T - B
+          const minReach = modalSCurveChannel === 'tv' ? modalSCurveData.tv_min_reach : modalSCurveData.digital_min_reach
+          const maxReach = modalSCurveChannel === 'tv' ? modalSCurveData.tv_max_reach : modalSCurveData.digital_max_reach
+          const xs = activeCurvePoints.map(getPointX)
+          const ys = activeCurvePoints.map(p => p.predicted_volume)
+          const xMin = Math.min(...xs), xMax = Math.max(...xs)
+          const yMin = Math.min(...ys), yMax = Math.max(...ys)
+          const xPad = Math.max(1, (xMax - xMin) * 0.05)
+          const yPad = Math.max(0.1, (yMax - yMin) * 0.1)
+          const mx = (x: number) => L + ((x - (xMin - xPad)) / Math.max(1e-9, (xMax + xPad) - (xMin - xPad))) * pw
+          const my = (y: number) => T + (((yMax + yPad) - y) / Math.max(1e-9, (yMax + yPad) - (yMin - yPad))) * ph
+          const linePath = activeCurvePoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${mx(getPointX(p)).toFixed(1)} ${my(p.predicted_volume).toFixed(1)}`).join(' ')
+          const areaPath = `${linePath} L ${mx(getPointX(activeCurvePoints[activeCurvePoints.length - 1])).toFixed(1)} ${(T + ph).toFixed(1)} L ${mx(getPointX(activeCurvePoints[0])).toFixed(1)} ${(T + ph).toFixed(1)} Z`
+          const baselinePoint = activeCurvePoints.reduce((best, curr) => Math.abs(curr.pct_change_input) < Math.abs(best.pct_change_input) ? curr : best)
+          const bx = mx(getPointX(baselinePoint)), by = my(baselinePoint.predicted_volume)
+          // New allocation marker — closest curve point to new reach
+          const newAllocPoint = newReach > 0
+            ? activeCurvePoints.reduce((best, curr) =>
+                Math.abs(getPointX(curr) - newReach) < Math.abs(getPointX(best) - newReach) ? curr : best)
+            : null
+          const nx = newAllocPoint ? mx(getPointX(newAllocPoint)) : null
+          const ny = newAllocPoint ? my(newAllocPoint.predicted_volume) : null
+          const yTicks = Array.from({ length: 4 }, (_, i) => yMin + (i / 3) * (yMax - yMin))
+          const xTicks = Array.from({ length: 5 }, (_, i) => xMin + (i / 4) * (xMax - xMin))
+          const fmtX = (x: number) => x > 1e6 ? `${(x / 1e6).toFixed(1)}M` : x > 1e3 ? `${(x / 1e3).toFixed(0)}K` : x.toFixed(0)
+          // Min/max band on x-axis
+          const minX = (minReach != null && Number.isFinite(minReach)) ? mx(Number(minReach)) : null
+          const maxX = (maxReach != null && Number.isFinite(maxReach)) ? mx(Number(maxReach)) : null
+          return (
+            <div>
+            <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 200 }}>
+              <defs>
+                <linearGradient id="mcg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={curveColor} stopOpacity="0.18" />
+                  <stop offset="100%" stopColor={curveColor} stopOpacity="0.02" />
+                </linearGradient>
+              </defs>
+              {/* Grid lines */}
+              {yTicks.map((y, i) => <line key={i} x1={L} x2={W - R} y1={my(y).toFixed(1)} y2={my(y).toFixed(1)} stroke="#e2e8f0" strokeWidth="1" />)}
+              {/* Min/max shaded band */}
+              {minX != null && maxX != null && (
+                <rect x={minX.toFixed(1)} y={T} width={(maxX - minX).toFixed(1)} height={ph} fill={curveColor} opacity="0.07" rx="2" />
+              )}
+              {/* Area */}
+              <path d={areaPath} fill="url(#mcg)" />
+              {/* Curve */}
+              <path d={linePath} fill="none" stroke={curveColor} strokeWidth="2" strokeLinejoin="round" />
+              {/* Min line */}
+              {minX != null && (
+                <>
+                  <line x1={minX.toFixed(1)} x2={minX.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1.5" strokeDasharray="4 2" opacity="0.7" />
+                  <text x={minX} y={T + ph + 12} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.9">Min</text>
+                  <text x={minX} y={T + ph + 21} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.7">{fmtX(Number(minReach))}</text>
+                </>
+              )}
+              {/* Max line */}
+              {maxX != null && (
+                <>
+                  <line x1={maxX.toFixed(1)} x2={maxX.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1.5" strokeDasharray="4 2" opacity="0.7" />
+                  <text x={maxX} y={T + ph + 12} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.9">Max</text>
+                  <text x={maxX} y={T + ph + 21} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.7">{fmtX(Number(maxReach))}</text>
+                </>
+              )}
+              {/* Baseline dot */}
+              <circle cx={bx.toFixed(1)} cy={by.toFixed(1)} r="4" fill={curveColor} opacity="0.5" />
+              <line x1={bx.toFixed(1)} x2={bx.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1" strokeDasharray="3 3" opacity="0.3" />
+              <text x={bx} y={T + ph + 12} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.6">Base</text>
+              {/* New allocation marker */}
+              {nx != null && ny != null && (
+                <>
+                  <line x1={nx.toFixed(1)} x2={nx.toFixed(1)} y1={T} y2={T + ph} stroke="#10b981" strokeWidth="1.5" strokeDasharray="4 2" opacity="0.8" />
+                  <circle cx={nx.toFixed(1)} cy={ny.toFixed(1)} r="5" fill="#10b981" stroke="white" strokeWidth="1.5" />
+                  <text x={nx} y={T + ph + 12} textAnchor="middle" fontSize="8" fontWeight="bold" fill="#10b981">New</text>
+                  <text x={nx} y={T + ph + 21} textAnchor="middle" fontSize="8" fill="#10b981" opacity="0.8">{fmtX(newReach)}</text>
+                </>
+              )}
+              {/* Y axis ticks */}
+              {yTicks.map((y, i) => (
+                <text key={i} x={L - 4} y={my(y) + 4} textAnchor="end" fontSize="9" fill="#94a3b8">
+                  {y > 1e6 ? `${(y / 1e6).toFixed(1)}M` : y > 1e3 ? `${(y / 1e3).toFixed(0)}K` : y.toFixed(0)}
+                </text>
+              ))}
+              {/* X axis ticks */}
+              {xTicks.map((x, i) => (
+                <text key={i} x={mx(x)} y={H - 30} textAnchor="middle" fontSize="9" fill="#94a3b8">{fmtX(x)}</text>
+              ))}
+              <text x={W / 2} y={H - 18} textAnchor="middle" fontSize="9" fill="#94a3b8">{modalSCurveChannel === 'tv' ? 'TV Reach' : 'Digital Reach'}</text>
+            </svg>
+            {(minReach != null || maxReach != null) && (
+              <div className="mt-1 flex items-center gap-4 px-1 text-[10px]" style={{ color: curveColor }}>
+                {minReach != null && <span>Min: <strong>{fmtX(Number(minReach))}</strong></span>}
+                {maxReach != null && <span>Max: <strong>{fmtX(Number(maxReach))}</strong></span>}
+                <span className="text-slate-400 ml-auto">Shaded band = feasible reach range</span>
+              </div>
+            )}
+            </div>
+          )
+        }
+        const oldTvSpend = (Number(r.fy25_tv_reach ?? 0)) * (Number(r.tv_cpr ?? 0))
+        const oldDigSpend = (Number(r.fy25_digital_reach ?? 0)) * (Number(r.digital_cpr ?? 0))
+        const newTvSpend = Number(r.new_total_tv_spend ?? 0)
+        const newDigSpend = Number(r.new_total_digital_spend ?? 0)
+        const oldTotalForShare = oldTvSpend + oldDigSpend
+        const newTotalForShare = newTvSpend + newDigSpend
+        const oldTvSharePct = oldTotalForShare > 0 ? (oldTvSpend / oldTotalForShare) * 100 : 0
+        const newTvSharePct = newTotalForShare > 0 ? (newTvSpend / newTotalForShare) * 100 : 0
+        const tvDelta = newTvSpend - oldTvSpend
+        const digDelta = newDigSpend - oldDigSpend
+        const oldTvReachPct = Number(r.fy25_tv_share ?? 0) * 100
+        const newTvReachPct = Number(r.tv_split ?? 0) * 100
+        const oldDigReachPct = Number(r.fy25_digital_share ?? 0) * 100
+        const newDigReachPct = Number(r.digital_split ?? 0) * 100
+        const isIncrease = r.deltaBudget >= 0
+        const signed = (v: number) => `${v >= 0 ? '+' : ''}${formatCompactBudgetValue(Math.abs(v))}`
+        const deltaColor = (v: number) => v >= 0 ? 'text-emerald-700' : 'text-rose-700'
+        const badgeBg = (v: number) => v >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
+        return (
+          <div
+            className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm"
+            onClick={() => closeMarketDetailModal()}
+          >
+            <div
+              className={`w-full rounded-2xl border border-slate-200 bg-white shadow-2xl mx-4 transition-all ${modalSCurveChannel ? 'max-w-2xl' : 'max-w-lg'}`}
+              onClick={e => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+                <div>
+                  <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Market Detail</p>
+                  <p className="mt-0.5 text-base font-bold text-slate-900">{r.market}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-semibold uppercase ${isIncrease ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                    Budget {isIncrease ? 'Increased' : 'Decreased'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => closeMarketDetailModal()}
+                    className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-500 hover:bg-slate-50"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-4 p-5">
+                {/* Total budget row */}
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Original Budget</p>
+                    <p className="mt-1 text-sm font-bold text-slate-700">{formatCompactBudgetValue(r.old_total_spend)}</p>
+                    <p className="text-[10px] text-slate-400">{formatBudgetValue(r.old_total_spend)}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">New Budget</p>
+                    <p className={`mt-1 text-sm font-bold ${deltaColor(r.deltaBudget)}`}>{formatCompactBudgetValue(r.new_total_spend)}</p>
+                    <p className="text-[10px] text-slate-400">{formatBudgetValue(r.new_total_spend)}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-center">
+                    <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Change</p>
+                    <p className={`mt-1 text-sm font-bold ${deltaColor(r.deltaBudget)}`}>{signed(r.deltaBudget)}</p>
+                  </div>
+                </div>
+
+                {/* TV / Digital cards */}
+                <div>
+                  <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-blue-600">TV vs Digital Budget Split</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    {/* TV */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = modalSCurveChannel === 'tv' ? null : 'tv'
+                        setModalSCurveChannel(next)
+                        if (next && (modalSCurveMarket !== r.market || !modalSCurveData)) void fetchModalSCurves(r.market)
+                      }}
+                      className={`rounded-xl border p-3 text-left transition w-full ${modalSCurveChannel === 'tv' ? 'border-blue-400 bg-blue-50 ring-2 ring-blue-200' : 'border-blue-100 bg-blue-50/40 hover:border-blue-300'}`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-bold text-blue-700">TV {modalSCurveChannel === 'tv' ? '▲' : '→ S-Curve'}</p>
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${badgeBg(tvDelta)}`}>
+                          {tvDelta !== 0 ? signed(tvDelta) : '—'}
+                        </span>
+                      </div>
+                      <div className="mt-3 flex items-end gap-2">
+                        <div className="flex-1 text-center">
+                          <p className="text-[10px] uppercase tracking-wide text-slate-400">Before</p>
+                          <p className="text-base font-bold text-slate-700">{formatCompactBudgetValue(oldTvSpend)}</p>
+                          <p className="text-[10px] text-slate-500">{formatMetric(oldTvSharePct, 1)}% of market</p>
+                        </div>
+                        <p className="mb-1 text-slate-300">→</p>
+                        <div className="flex-1 text-center">
+                          <p className="text-[10px] uppercase tracking-wide text-slate-400">After</p>
+                          <p className={`text-base font-bold ${deltaColor(tvDelta)}`}>{formatCompactBudgetValue(newTvSpend)}</p>
+                          <p className="text-[10px] text-slate-500">{formatMetric(newTvSharePct, 1)}% of market</p>
+                        </div>
+                      </div>
+                      {(oldTvReachPct > 0 || newTvReachPct > 0) && (
+                        <p className="mt-2 text-[10px] text-slate-400">
+                          Reach mix: {formatMetric(oldTvReachPct, 1)}% → <span className={deltaColor(newTvReachPct - oldTvReachPct)}>{formatMetric(newTvReachPct, 1)}%</span>
+                        </p>
+                      )}
+                    </button>
+
+                    {/* Digital */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = modalSCurveChannel === 'digital' ? null : 'digital'
+                        setModalSCurveChannel(next)
+                        if (next && (modalSCurveMarket !== r.market || !modalSCurveData)) void fetchModalSCurves(r.market)
+                      }}
+                      className={`rounded-xl border p-3 text-left transition w-full ${modalSCurveChannel === 'digital' ? 'border-purple-400 bg-purple-50 ring-2 ring-purple-200' : 'border-purple-100 bg-purple-50/40 hover:border-purple-300'}`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-bold text-purple-700">Digital {modalSCurveChannel === 'digital' ? '▲' : '→ S-Curve'}</p>
+                        <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${badgeBg(digDelta)}`}>
+                          {digDelta !== 0 ? signed(digDelta) : '—'}
+                        </span>
+                      </div>
+                      <div className="mt-3 flex items-end gap-2">
+                        <div className="flex-1 text-center">
+                          <p className="text-[10px] uppercase tracking-wide text-slate-400">Before</p>
+                          <p className="text-base font-bold text-slate-700">{formatCompactBudgetValue(oldDigSpend)}</p>
+                          <p className="text-[10px] text-slate-500">{formatMetric(100 - oldTvSharePct, 1)}% of market</p>
+                        </div>
+                        <p className="mb-1 text-slate-300">→</p>
+                        <div className="flex-1 text-center">
+                          <p className="text-[10px] uppercase tracking-wide text-slate-400">After</p>
+                          <p className={`text-base font-bold ${deltaColor(digDelta)}`}>{formatCompactBudgetValue(newDigSpend)}</p>
+                          <p className="text-[10px] text-slate-500">{formatMetric(100 - newTvSharePct, 1)}% of market</p>
+                        </div>
+                      </div>
+                      {(oldDigReachPct > 0 || newDigReachPct > 0) && (
+                        <p className="mt-2 text-[10px] text-slate-400">
+                          Reach mix: {formatMetric(oldDigReachPct, 1)}% → <span className={deltaColor(newDigReachPct - oldDigReachPct)}>{formatMetric(newDigReachPct, 1)}%</span>
+                        </p>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* S-Curve chart */}
+                {modalSCurveChannel && (
+                  <div className="rounded-xl border border-slate-200 bg-white p-3">
+                    <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: curveColor }}>
+                      {modalSCurveChannel === 'tv' ? 'TV' : 'Digital'} S-Curve — {r.market}
+                    </p>
+                    {renderSCurveChart()}
+                  </div>
+                )}
               </div>
             </div>
           </div>

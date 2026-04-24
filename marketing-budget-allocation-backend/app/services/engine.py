@@ -89,6 +89,7 @@ class ScenarioJobCreateRequest(BaseModel):
     strategy_override: dict[str, Any] | None = None
     scenario_budget_lower: float | None = None
     scenario_budget_upper: float | None = None
+    scenario_label_prefix: str | None = None
     target_scenarios: int = SCENARIO_TARGET_DEFAULT
     max_runtime_seconds: int = 900
 
@@ -1792,6 +1793,7 @@ def _build_fast_seed_vector(
     target_budget: float,
     region_prices: dict[str, float],
     objective: str = "volume",
+    elasticity_map: dict[str, dict[str, Any]] | None = None,
 ) -> np.ndarray:
     vector = np.zeros(2 * len(regions), dtype=float)
     increasing_budget = float(target_budget) >= float(baseline_budget)
@@ -1806,40 +1808,62 @@ def _build_fast_seed_vector(
         tv_probe = min(max(0.12, min(0.3, tv_hi)), tv_hi) if increasing_budget else max(min(-0.12, max(-0.3, tv_lo)), tv_lo)
         dg_probe = min(max(0.12, min(0.3, dg_hi)), dg_hi) if increasing_budget else max(min(-0.12, max(-0.3, dg_lo)), dg_lo)
 
-        base_volume = float(_predict_region_volume(md, 0.0, 0.0))
-        tv_volume = float(_predict_region_volume(md, tv_probe, 0.0)) if abs(tv_probe) > 1e-9 else base_volume
-        dg_volume = float(_predict_region_volume(md, 0.0, dg_probe)) if abs(dg_probe) > 1e-9 else base_volume
+        # Use TV/Digital elasticity ratio from the India-level file to guide within-market split.
+        # For increasing budgets: allocate proportional to elasticity (higher elasticity → more spend).
+        # For decreasing budgets: protect the more elastic channel (cut proportional to the other's elasticity).
+        el_row = (elasticity_map or {}).get(region, {})
+        tv_el = float(_finite(el_row.get("tv_reach_elasticity", 0.0), 0.0)) if el_row else 0.0
+        dg_el = float(_finite(el_row.get("digital_reach_elasticity", 0.0), 0.0)) if el_row else 0.0
+        el_sum = max(0.0, tv_el) + max(0.0, dg_el)
+        use_elasticity_split = el_sum > 1e-9 and tv_el > 0.0 and dg_el > 0.0
 
-        price = max(0.0, float(_finite(region_prices.get(region, 1.0), 1.0)))
-        metric_scale = price if objective == "revenue" else 1.0
-        tv_metric_gain = (tv_volume - base_volume) * metric_scale
-        dg_metric_gain = (dg_volume - base_volume) * metric_scale
-
-        tv_cost = max(1.0, abs(float(np.sum(md["r_tv_list"])) * float(md["tv_cpr"]) * tv_probe))
-        dg_cost = max(1.0, abs(float(np.sum(md["r_dig_list"])) * float(md["digital_cpr"]) * dg_probe))
-        tv_roi = float(tv_metric_gain / tv_cost) if np.isfinite(tv_metric_gain) else 0.0
-        dg_roi = float(dg_metric_gain / dg_cost) if np.isfinite(dg_metric_gain) else 0.0
-
-        if increasing_budget:
-            tv_score = max(0.0, tv_roi)
-            dg_score = max(0.0, dg_roi)
-            score_sum = tv_score + dg_score
-            if score_sum <= 1e-12:
-                vector[tv_i] = min(tv_hi, max(0.0, tv_probe))
-                vector[dg_i] = min(dg_hi, max(0.0, dg_probe))
+        if use_elasticity_split:
+            tv_el_share = max(0.0, tv_el) / el_sum
+            dg_el_share = 1.0 - tv_el_share
+            if increasing_budget:
+                vector[tv_i] = min(tv_hi, max(0.0, tv_hi * tv_el_share))
+                vector[dg_i] = min(dg_hi, max(0.0, dg_hi * dg_el_share))
             else:
-                vector[tv_i] = min(tv_hi, max(0.0, tv_hi * (tv_score / score_sum)))
-                vector[dg_i] = min(dg_hi, max(0.0, dg_hi * (dg_score / score_sum)))
+                # Protect more elastic channel: cut it less (inverse share)
+                tv_cut_share = dg_el_share
+                dg_cut_share = tv_el_share
+                vector[tv_i] = max(tv_lo, min(0.0, tv_lo * tv_cut_share))
+                vector[dg_i] = max(dg_lo, min(0.0, dg_lo * dg_cut_share))
         else:
-            tv_score = max(0.0, -tv_roi)
-            dg_score = max(0.0, -dg_roi)
-            score_sum = tv_score + dg_score
-            if score_sum <= 1e-12:
-                vector[tv_i] = max(tv_lo, min(0.0, tv_probe))
-                vector[dg_i] = max(dg_lo, min(0.0, dg_probe))
+            base_volume = float(_predict_region_volume(md, 0.0, 0.0))
+            tv_volume = float(_predict_region_volume(md, tv_probe, 0.0)) if abs(tv_probe) > 1e-9 else base_volume
+            dg_volume = float(_predict_region_volume(md, 0.0, dg_probe)) if abs(dg_probe) > 1e-9 else base_volume
+
+            price = max(0.0, float(_finite(region_prices.get(region, 1.0), 1.0)))
+            metric_scale = price if objective == "revenue" else 1.0
+            tv_metric_gain = (tv_volume - base_volume) * metric_scale
+            dg_metric_gain = (dg_volume - base_volume) * metric_scale
+
+            tv_cost = max(1.0, abs(float(np.sum(md["r_tv_list"])) * float(md["tv_cpr"]) * tv_probe))
+            dg_cost = max(1.0, abs(float(np.sum(md["r_dig_list"])) * float(md["digital_cpr"]) * dg_probe))
+            tv_roi = float(tv_metric_gain / tv_cost) if np.isfinite(tv_metric_gain) else 0.0
+            dg_roi = float(dg_metric_gain / dg_cost) if np.isfinite(dg_metric_gain) else 0.0
+
+            if increasing_budget:
+                tv_score = max(0.0, tv_roi)
+                dg_score = max(0.0, dg_roi)
+                score_sum = tv_score + dg_score
+                if score_sum <= 1e-12:
+                    vector[tv_i] = min(tv_hi, max(0.0, tv_probe))
+                    vector[dg_i] = min(dg_hi, max(0.0, dg_probe))
+                else:
+                    vector[tv_i] = min(tv_hi, max(0.0, tv_hi * (tv_score / score_sum)))
+                    vector[dg_i] = min(dg_hi, max(0.0, dg_hi * (dg_score / score_sum)))
             else:
-                vector[tv_i] = max(tv_lo, min(0.0, tv_lo * (tv_score / score_sum)))
-                vector[dg_i] = max(dg_lo, min(0.0, dg_lo * (dg_score / score_sum)))
+                tv_score = max(0.0, -tv_roi)
+                dg_score = max(0.0, -dg_roi)
+                score_sum = tv_score + dg_score
+                if score_sum <= 1e-12:
+                    vector[tv_i] = max(tv_lo, min(0.0, tv_probe))
+                    vector[dg_i] = max(dg_lo, min(0.0, dg_probe))
+                else:
+                    vector[tv_i] = max(tv_lo, min(0.0, tv_lo * (tv_score / score_sum)))
+                    vector[dg_i] = max(dg_lo, min(0.0, dg_lo * (dg_score / score_sum)))
 
     return vector
 
@@ -7733,6 +7757,7 @@ def _generate_scenarios_for_context(
     max_runtime_seconds: int,
     requested_scenario_budget_lower: float | None = None,
     requested_scenario_budget_upper: float | None = None,
+    scenario_label_prefix: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Use-case note for AI review:
@@ -7783,6 +7808,14 @@ def _generate_scenarios_for_context(
         )
     rng = random.Random(_stable_score(f"{ctx['brand']}|{','.join(regions)}|{seed_budget}|{scenario_budget_lower}|{scenario_budget_upper}"))
 
+    # Build per-market elasticity lookup from India-level all-brand file for TV/Digital split guidance.
+    market_elasticity_rows = (ctx.get("market_elasticity_guidance") or {}).get("rows", [])
+    seed_elasticity_map: dict[str, dict[str, Any]] = {
+        str(r.get("market", "")).strip(): r
+        for r in market_elasticity_rows
+        if isinstance(r, dict) and str(r.get("market", "")).strip()
+    }
+
     set_progress(20, "Computing deterministic seed scenarios...")
     volume_seed = _build_fast_seed_vector(
         market_data=market_data,
@@ -7792,6 +7825,7 @@ def _generate_scenarios_for_context(
         target_budget=seed_budget,
         region_prices=region_prices,
         objective="volume",
+        elasticity_map=seed_elasticity_map,
     )
     revenue_seed = _build_fast_seed_vector(
         market_data=market_data,
@@ -7801,6 +7835,7 @@ def _generate_scenarios_for_context(
         target_budget=seed_budget,
         region_prices=region_prices,
         objective="revenue",
+        elasticity_map=seed_elasticity_map,
     )
     balanced_seed = (np.array(volume_seed, dtype=float) + np.array(revenue_seed, dtype=float)) / 2.0
     for i, (lo, hi) in enumerate(bounds):
@@ -8073,9 +8108,15 @@ def _generate_scenarios_for_context(
     if timeout_hit:
         notes.append(f"Generation stopped at runtime cap ({runtime_limit}s) to keep UI responsive.")
 
+    family_sequence: dict[str, int] = {}
+    label_prefix = str(scenario_label_prefix or "").strip()
     for idx, scenario in enumerate(accepted, start=1):
         scenario["scenario_index"] = idx
-        scenario["scenario_id"] = f"SCN-{idx:04d}"
+        family_label = str(scenario.get("family") or "Scenario").strip() or "Scenario"
+        family_key = family_label.lower()
+        family_sequence[family_key] = family_sequence.get(family_key, 0) + 1
+        family_scenario_id = f"{family_label} {family_sequence[family_key]}"
+        scenario["scenario_id"] = f"{label_prefix} / {family_scenario_id}" if label_prefix else family_scenario_id
         scenario.pop("_vector_key", None)
 
     _apply_balanced_scores(accepted)
@@ -8166,6 +8207,7 @@ def _run_scenario_job(job_id: str, payload: ScenarioJobCreateRequest) -> None:
             max_runtime_seconds=payload.max_runtime_seconds,
             requested_scenario_budget_lower=payload.scenario_budget_lower,
             requested_scenario_budget_upper=payload.scenario_budget_upper,
+            scenario_label_prefix=payload.scenario_label_prefix,
         )
         result_payload = {
             "summary": artifacts["summary"],
