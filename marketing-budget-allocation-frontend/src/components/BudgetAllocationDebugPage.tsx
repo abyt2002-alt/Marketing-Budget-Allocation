@@ -1743,17 +1743,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
         </div>
       </div>
 
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3 px-1">
-        <div>
-          <p className="budget-kicker">Budget Allocation 2.0</p>
-          <h2 className="mt-1 text-xl font-semibold tracking-tight text-slate-950">Intent Interpreter</h2>
-        </div>
-        <span className="rounded-full border border-[#d7cbb7] bg-[#fbf8f1] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-[#8c7554]">
-          Trinity · HITL · Loop
-        </span>
-      </div>
-
       {/* Main layout */}
       <div className="space-y-4">
 
