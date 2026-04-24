@@ -272,6 +272,10 @@ type ModalSCurveData = {
   digital: ModalSCurvePoint[]
   baseline_tv_reach?: number
   baseline_digital_reach?: number
+  tv_min_reach?: number
+  tv_max_reach?: number
+  digital_min_reach?: number
+  digital_max_reach?: number
 }
 
 type SavedScenarioPlan = {
@@ -793,7 +797,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     setModalSCurveError('')
     setModalSCurveData(null)
     try {
-      const res = await axios.post<{ curves: { tv: ModalSCurvePoint[]; digital: ModalSCurvePoint[] }; summary: { baseline_tv_reach?: number; baseline_digital_reach?: number } }>(
+      const res = await axios.post<{ curves: { tv: ModalSCurvePoint[]; digital: ModalSCurvePoint[] }; summary: { baseline_tv_reach?: number; baseline_digital_reach?: number; tv_min_reach?: number; tv_max_reach?: number; digital_min_reach?: number; digital_max_reach?: number } }>(
         `${apiBaseUrl}/api/s-curves-auto`,
         { selected_brand: brand, selected_markets: [market], points: 41, min_scale: 0.2, max_scale: 2.5 },
       )
@@ -802,6 +806,10 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
         digital: res.data.curves.digital,
         baseline_tv_reach: res.data.summary.baseline_tv_reach,
         baseline_digital_reach: res.data.summary.baseline_digital_reach,
+        tv_min_reach: res.data.summary.tv_min_reach,
+        tv_max_reach: res.data.summary.tv_max_reach,
+        digital_min_reach: res.data.summary.digital_min_reach,
+        digital_max_reach: res.data.summary.digital_max_reach,
       })
     } catch {
       setModalSCurveError('Failed to load S-curve.')
@@ -3764,8 +3772,10 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
           if (!modalSCurveData || activeCurvePoints.length === 0) return (
             <p className="py-6 text-center text-sm text-slate-400">No curve data available.</p>
           )
-          const W = 520, H = 200, L = 44, R = 12, T = 12, B = 36
+          const W = 520, H = 220, L = 44, R = 12, T = 12, B = 52
           const pw = W - L - R, ph = H - T - B
+          const minReach = modalSCurveChannel === 'tv' ? modalSCurveData.tv_min_reach : modalSCurveData.digital_min_reach
+          const maxReach = modalSCurveChannel === 'tv' ? modalSCurveData.tv_max_reach : modalSCurveData.digital_max_reach
           const xs = activeCurvePoints.map(getPointX)
           const ys = activeCurvePoints.map(p => p.predicted_volume)
           const xMin = Math.min(...xs), xMax = Math.max(...xs)
@@ -3779,9 +3789,14 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
           const baselinePoint = activeCurvePoints.reduce((best, curr) => Math.abs(curr.pct_change_input) < Math.abs(best.pct_change_input) ? curr : best)
           const bx = mx(getPointX(baselinePoint)), by = my(baselinePoint.predicted_volume)
           const yTicks = Array.from({ length: 4 }, (_, i) => yMin + (i / 3) * (yMax - yMin))
-          const xTicks = Array.from({ length: 4 }, (_, i) => xMin + (i / 3) * (xMax - xMin))
+          const xTicks = Array.from({ length: 5 }, (_, i) => xMin + (i / 4) * (xMax - xMin))
+          const fmtX = (x: number) => x > 1e6 ? `${(x / 1e6).toFixed(1)}M` : x > 1e3 ? `${(x / 1e3).toFixed(0)}K` : x.toFixed(0)
+          // Min/max band on x-axis
+          const minX = (minReach != null && Number.isFinite(minReach)) ? mx(Number(minReach)) : null
+          const maxX = (maxReach != null && Number.isFinite(maxReach)) ? mx(Number(maxReach)) : null
           return (
-            <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 180 }}>
+            <div>
+            <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 200 }}>
               <defs>
                 <linearGradient id="mcg" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor={curveColor} stopOpacity="0.18" />
@@ -3790,13 +3805,34 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
               </defs>
               {/* Grid lines */}
               {yTicks.map((y, i) => <line key={i} x1={L} x2={W - R} y1={my(y).toFixed(1)} y2={my(y).toFixed(1)} stroke="#e2e8f0" strokeWidth="1" />)}
+              {/* Min/max shaded band */}
+              {minX != null && maxX != null && (
+                <rect x={minX.toFixed(1)} y={T} width={(maxX - minX).toFixed(1)} height={ph} fill={curveColor} opacity="0.07" rx="2" />
+              )}
               {/* Area */}
               <path d={areaPath} fill="url(#mcg)" />
               {/* Curve */}
               <path d={linePath} fill="none" stroke={curveColor} strokeWidth="2" strokeLinejoin="round" />
+              {/* Min line */}
+              {minX != null && (
+                <>
+                  <line x1={minX.toFixed(1)} x2={minX.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1.5" strokeDasharray="4 2" opacity="0.7" />
+                  <text x={minX} y={T + ph + 12} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.9">Min</text>
+                  <text x={minX} y={T + ph + 21} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.7">{fmtX(Number(minReach))}</text>
+                </>
+              )}
+              {/* Max line */}
+              {maxX != null && (
+                <>
+                  <line x1={maxX.toFixed(1)} x2={maxX.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1.5" strokeDasharray="4 2" opacity="0.7" />
+                  <text x={maxX} y={T + ph + 12} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.9">Max</text>
+                  <text x={maxX} y={T + ph + 21} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.7">{fmtX(Number(maxReach))}</text>
+                </>
+              )}
               {/* Baseline dot */}
               <circle cx={bx.toFixed(1)} cy={by.toFixed(1)} r="4" fill={curveColor} />
-              <line x1={bx.toFixed(1)} x2={bx.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1" strokeDasharray="3 3" opacity="0.5" />
+              <line x1={bx.toFixed(1)} x2={bx.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1" strokeDasharray="3 3" opacity="0.4" />
+              <text x={bx} y={T + ph + 12} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.8">Base</text>
               {/* Y axis ticks */}
               {yTicks.map((y, i) => (
                 <text key={i} x={L - 4} y={my(y) + 4} textAnchor="end" fontSize="9" fill="#94a3b8">
@@ -3805,12 +3841,18 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
               ))}
               {/* X axis ticks */}
               {xTicks.map((x, i) => (
-                <text key={i} x={mx(x)} y={H - 6} textAnchor="middle" fontSize="9" fill="#94a3b8">
-                  {x > 1e6 ? `${(x / 1e6).toFixed(1)}M` : x > 1e3 ? `${(x / 1e3).toFixed(0)}K` : x.toFixed(0)}
-                </text>
+                <text key={i} x={mx(x)} y={H - 30} textAnchor="middle" fontSize="9" fill="#94a3b8">{fmtX(x)}</text>
               ))}
-              <text x={W / 2} y={H - 0} textAnchor="middle" fontSize="9" fill="#94a3b8">{modalSCurveChannel === 'tv' ? 'TV Reach' : 'Digital Reach'}</text>
+              <text x={W / 2} y={H - 18} textAnchor="middle" fontSize="9" fill="#94a3b8">{modalSCurveChannel === 'tv' ? 'TV Reach' : 'Digital Reach'}</text>
             </svg>
+            {(minReach != null || maxReach != null) && (
+              <div className="mt-1 flex items-center gap-4 px-1 text-[10px]" style={{ color: curveColor }}>
+                {minReach != null && <span>Min: <strong>{fmtX(Number(minReach))}</strong></span>}
+                {maxReach != null && <span>Max: <strong>{fmtX(Number(maxReach))}</strong></span>}
+                <span className="text-slate-400 ml-auto">Shaded band = feasible reach range</span>
+              </div>
+            )}
+            </div>
           )
         }
         const oldTvSpend = (Number(r.fy25_tv_reach ?? 0)) * (Number(r.tv_cpr ?? 0))
