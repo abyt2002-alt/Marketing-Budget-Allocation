@@ -1839,7 +1839,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Business QA Check</p>
-                        <p className="mt-1 text-sm text-slate-600">This section stays separate from generated scenarios and consolidates all market reasoning into the two review buckets below.</p>
                       </div>
                       <div className="flex items-center gap-2">
                         {approvalEvaluation ? (
