@@ -233,6 +233,8 @@ type ScenarioMarketRow = {
   new_total_digital_spend?: number
   fy25_tv_reach?: number
   fy25_digital_reach?: number
+  new_annual_tv_reach?: number
+  new_annual_digital_reach?: number
   tv_cpr?: number
   digital_cpr?: number
   tv_split?: number
@@ -3762,6 +3764,10 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
         const baselineReach = modalSCurveChannel === 'tv' ? modalSCurveData?.baseline_tv_reach : modalSCurveData?.baseline_digital_reach
         const xKey = modalSCurveChannel === 'tv' ? 'tv_reach' : 'digital_reach'
         const curveColor = modalSCurveChannel === 'tv' ? '#3b82f6' : '#a855f7'
+        // New allocation reach: prefer direct field, fallback to spend ÷ CPR
+        const newReach = modalSCurveChannel === 'tv'
+          ? (Number(r.new_annual_tv_reach ?? 0) || (Number(r.new_total_tv_spend ?? 0) / Math.max(1e-9, Number(r.tv_cpr ?? 1))))
+          : (Number(r.new_annual_digital_reach ?? 0) || (Number(r.new_total_digital_spend ?? 0) / Math.max(1e-9, Number(r.digital_cpr ?? 1))))
 
         const getPointX = (p: ModalSCurvePoint) => {
           const raw = xKey === 'tv_reach' ? p.tv_reach : p.digital_reach
@@ -3798,6 +3804,13 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
           const areaPath = `${linePath} L ${mx(getPointX(activeCurvePoints[activeCurvePoints.length - 1])).toFixed(1)} ${(T + ph).toFixed(1)} L ${mx(getPointX(activeCurvePoints[0])).toFixed(1)} ${(T + ph).toFixed(1)} Z`
           const baselinePoint = activeCurvePoints.reduce((best, curr) => Math.abs(curr.pct_change_input) < Math.abs(best.pct_change_input) ? curr : best)
           const bx = mx(getPointX(baselinePoint)), by = my(baselinePoint.predicted_volume)
+          // New allocation marker — closest curve point to new reach
+          const newAllocPoint = newReach > 0
+            ? activeCurvePoints.reduce((best, curr) =>
+                Math.abs(getPointX(curr) - newReach) < Math.abs(getPointX(best) - newReach) ? curr : best)
+            : null
+          const nx = newAllocPoint ? mx(getPointX(newAllocPoint)) : null
+          const ny = newAllocPoint ? my(newAllocPoint.predicted_volume) : null
           const yTicks = Array.from({ length: 4 }, (_, i) => yMin + (i / 3) * (yMax - yMin))
           const xTicks = Array.from({ length: 5 }, (_, i) => xMin + (i / 4) * (xMax - xMin))
           const fmtX = (x: number) => x > 1e6 ? `${(x / 1e6).toFixed(1)}M` : x > 1e3 ? `${(x / 1e3).toFixed(0)}K` : x.toFixed(0)
@@ -3840,9 +3853,18 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 </>
               )}
               {/* Baseline dot */}
-              <circle cx={bx.toFixed(1)} cy={by.toFixed(1)} r="4" fill={curveColor} />
-              <line x1={bx.toFixed(1)} x2={bx.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1" strokeDasharray="3 3" opacity="0.4" />
-              <text x={bx} y={T + ph + 12} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.8">Base</text>
+              <circle cx={bx.toFixed(1)} cy={by.toFixed(1)} r="4" fill={curveColor} opacity="0.5" />
+              <line x1={bx.toFixed(1)} x2={bx.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1" strokeDasharray="3 3" opacity="0.3" />
+              <text x={bx} y={T + ph + 12} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.6">Base</text>
+              {/* New allocation marker */}
+              {nx != null && ny != null && (
+                <>
+                  <line x1={nx.toFixed(1)} x2={nx.toFixed(1)} y1={T} y2={T + ph} stroke="#10b981" strokeWidth="1.5" strokeDasharray="4 2" opacity="0.8" />
+                  <circle cx={nx.toFixed(1)} cy={ny.toFixed(1)} r="5" fill="#10b981" stroke="white" strokeWidth="1.5" />
+                  <text x={nx} y={T + ph + 12} textAnchor="middle" fontSize="8" fontWeight="bold" fill="#10b981">New</text>
+                  <text x={nx} y={T + ph + 21} textAnchor="middle" fontSize="8" fill="#10b981" opacity="0.8">{fmtX(newReach)}</text>
+                </>
+              )}
               {/* Y axis ticks */}
               {yTicks.map((y, i) => (
                 <text key={i} x={L - 4} y={my(y) + 4} textAnchor="end" fontSize="9" fill="#94a3b8">
