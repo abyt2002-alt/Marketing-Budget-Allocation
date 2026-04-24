@@ -437,6 +437,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [scenarioModalSortBy, setScenarioModalSortBy] = useState<'budget_delta' | 'brand_salience' | 'market_share_change'>('budget_delta')
   const [scenarioModalChangeFilter, setScenarioModalChangeFilter] = useState<'all' | 'increase' | 'decrease'>('all')
   const [scenarioMarketDetailRow, setScenarioMarketDetailRow] = useState<(ScenarioMarketRow & { deltaBudget: number }) | null>(null)
+  const [scoringGridCollapsed, setScoringGridCollapsed] = useState(true)
   const [scenarioPlanMessage, setScenarioPlanMessage] = useState('')
   const [savedScenarioPlans, setSavedScenarioPlans] = useState<SavedScenarioPlan[]>([])
   const [savedPlansOpen, setSavedPlansOpen] = useState(false)
@@ -1936,9 +1937,21 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 )}
               </div>
 
-              {/* 5-Column Market Scoring Grid */}
+              {/* 5-Column Market Scoring Grid — collapsible */}
               {showScoringGrid && (
-                <div className="mt-4 space-y-2">
+                <div className="mt-4">
+                  <button
+                    type="button"
+                    onClick={() => setScoringGridCollapsed(prev => !prev)}
+                    className="flex w-full items-center justify-between rounded-xl border border-[#e8ddd0] bg-[#faf6f0] px-3 py-2 text-left transition hover:bg-[#f5ede0]"
+                  >
+                    <span className="text-xs font-semibold uppercase tracking-[0.14em] text-[#8c7554]">Market Scoring — {dispositions.length} markets</span>
+                    <span className="text-xs font-semibold text-[#8c7554]">{scoringGridCollapsed ? 'Show ▼' : 'Hide ▲'}</span>
+                  </button>
+                </div>
+              )}
+              {showScoringGrid && !scoringGridCollapsed && (
+                <div className="mt-2 space-y-2">
                   <div className="flex items-baseline justify-between">
                     <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">
                       Market Scoring — {dispositions.length} markets
@@ -2148,9 +2161,24 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
 
                     {!qaSectionCollapsed && approvalEvaluation && (
                       <div className="mt-4 space-y-4">
-                        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                          <p className="text-sm font-semibold text-slate-900">{approvalHeadline}</p>
-                          <p className="mt-1 text-sm leading-6 text-slate-600">{approvalSummary}</p>
+
+                        {/* Reasoning — what Trinity understood from the prompt */}
+                        <div className="rounded-2xl border border-[#e8ddd0] bg-[#faf6f0] px-4 py-4">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8c7554]">What Trinity Understood</p>
+                          <p className="mt-2 text-sm font-semibold text-slate-800 leading-5">{interp?.goal || prompt}</p>
+                          {interp?.reasoning && (
+                            <p className="mt-2 text-sm leading-6 text-slate-600">{interp.reasoning}</p>
+                          )}
+                          {(interp?.assumptions ?? []).length > 0 && (
+                            <div className="mt-3 space-y-1">
+                              {(interp?.assumptions ?? []).map((a, i) => (
+                                <p key={i} className="text-xs text-slate-500 leading-4">· {a}</p>
+                              ))}
+                            </div>
+                          )}
+                          {approvalHeadline && (
+                            <p className="mt-3 text-xs font-semibold text-[#7b5c33] leading-5">{approvalHeadline}</p>
+                          )}
                         </div>
 
                         <div className="grid gap-3 lg:grid-cols-3">
