@@ -425,6 +425,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [scenarioReachFilters, setScenarioReachFilters] = useState<ScenarioReachFilter[]>([
     { markets: [], direction: 'higher' },
     { markets: [], direction: 'lower' },
+    { markets: [], direction: 'equal' },
   ])
   const [resultsCollapsed, setResultsCollapsed] = useState(false)
   const [, setQaFeedbackText] = useState('')
@@ -464,6 +465,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [zoomReachFilters, setZoomReachFilters] = useState<ScenarioReachFilter[]>([
     { markets: [], direction: 'higher' },
     { markets: [], direction: 'lower' },
+    { markets: [], direction: 'equal' },
   ])
   const [openZoomReachFilterIndex, setOpenZoomReachFilterIndex] = useState<number | null>(null)
   const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -731,8 +733,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     if (scenarioMinVolumePct.trim() !== '') params.min_volume_uplift_pct = Number(scenarioMinVolumePct)
     if (scenarioMinRevenuePct.trim() !== '') params.min_revenue_uplift_pct = Number(scenarioMinRevenuePct)
     if (scenarioMaxBudgetUtilizedPctFilter.trim() !== '') params.max_budget_utilized_pct = Number(scenarioMaxBudgetUtilizedPctFilter)
-    scenarioReachFilters.slice(0, 2).forEach((filter, index) => {
-      if (!filter.markets.length) return
+    scenarioReachFilters.filter(f => f.markets.length > 0).slice(0, 2).forEach((filter, index) => {
       const suffix = index === 0 ? '' : '_2'
       params[`reach_share_market${suffix}`] = filter.markets.join(',')
       params[`reach_share_direction${suffix}`] = filter.direction
@@ -922,8 +923,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     if (zoomMinVolumePct.trim() !== '') params.min_volume_uplift_pct = Number(zoomMinVolumePct)
     if (zoomMinRevenuePct.trim() !== '') params.min_revenue_uplift_pct = Number(zoomMinRevenuePct)
     if (zoomMaxBudgetUtilizedPctFilter.trim() !== '') params.max_budget_utilized_pct = Number(zoomMaxBudgetUtilizedPctFilter)
-    zoomReachFilters.slice(0, 2).forEach((filter, index) => {
-      if (!filter.markets.length) return
+    zoomReachFilters.filter(f => f.markets.length > 0).slice(0, 2).forEach((filter, index) => {
       const suffix = index === 0 ? '' : '_2'
       params[`reach_share_market${suffix}`] = filter.markets.join(',')
       params[`reach_share_direction${suffix}`] = filter.direction
@@ -1943,10 +1943,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">Trinity Analysis</p>
                   <p className="mt-1 text-sm font-medium text-slate-800 leading-5">{interp.goal || prompt}</p>
                   <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                    {hitlMode === 'approved'
-                      ? <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-700">✓ Approved · {finalMarkets.length} markets</span>
-                      : confidencePct != null && <span className={`rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold ${confColor}`}>{confidencePct}% confidence</span>
-                    }
                     {scenarioResults && <span className="text-xs text-slate-400">{scenarioResults.summary.scenario_count.toLocaleString()} scenarios ready</span>}
                   </div>
                 </div>
