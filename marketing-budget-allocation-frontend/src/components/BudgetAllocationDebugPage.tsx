@@ -430,6 +430,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [, setQaFeedbackText] = useState('')
   const [qaSectionCollapsed, setQaSectionCollapsed] = useState(false)
   const [expandedQaCards, setExpandedQaCards] = useState<Record<string, boolean>>({})
+  const [qaActionExpanded, setQaActionExpanded] = useState<Record<string, boolean>>({})
   const [qaActionSelections, setQaActionSelections] = useState<Record<string, string>>({})
   const [qaSaveMessage, setQaSaveMessage] = useState('')
   const [scenarioModal, setScenarioModal] = useState<ScenarioItem | null>(null)
@@ -1329,7 +1330,9 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   ) {
     const cardKey = `${tone}-${review.market}`
     const isExpanded = Boolean(expandedQaCards[cardKey])
+    const isActionExpanded = Boolean(qaActionExpanded[cardKey])
     const selectedAction = qaActionSelections[review.market] ?? review.action_direction
+    const actionChanged = qaActionSelections[review.market] != null && qaActionSelections[review.market] !== review.action_direction
     const actionOptions = ['increase', 'slight_increase', 'maintain', 'slight_decrease', 'decrease']
     const reasonPoints = tone === 'support'
       ? (review.supporting_points.length ? review.supporting_points : [review.summary])
@@ -1359,24 +1362,42 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
             {review.verdict === 'at_risk' ? 'At risk' : review.verdict === 'supported' ? 'Supported' : review.verdict === 'mixed' ? 'Mixed' : 'Needs data'}
           </span>
         </div>
-        <div className="mt-2 flex flex-wrap gap-2">
-          {actionOptions.map((action) => {
-            const isSelected = selectedAction === action
-            return (
-              <button
-                key={`${review.market}-${action}`}
-                type="button"
-                onClick={() => setQaActionSelection(review.market, action)}
-                className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
-                  isSelected
-                    ? 'border-[#9c7a4a] bg-[#f4ece0] text-[#7b5c33]'
-                    : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
-                }`}
-              >
-                {formatActionLabel(action)}
-              </button>
-            )
-          })}
+        <div className="mt-2">
+          <button
+            type="button"
+            onClick={() => setQaActionExpanded(prev => ({ ...prev, [cardKey]: !prev[cardKey] }))}
+            className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
+              actionChanged
+                ? 'border-[#9c7a4a] bg-[#f4ece0] text-[#7b5c33]'
+                : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+            }`}
+          >
+            {actionChanged ? `✓ ${formatActionLabel(selectedAction)}` : 'Change Action'}
+          </button>
+          {isActionExpanded && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {actionOptions.map((action) => {
+                const isSelected = selectedAction === action
+                return (
+                  <button
+                    key={`${review.market}-${action}`}
+                    type="button"
+                    onClick={() => {
+                      setQaActionSelection(review.market, action)
+                      setQaActionExpanded(prev => ({ ...prev, [cardKey]: false }))
+                    }}
+                    className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
+                      isSelected
+                        ? 'border-[#9c7a4a] bg-[#f4ece0] text-[#7b5c33]'
+                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+                    }`}
+                  >
+                    {formatActionLabel(action)}
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </div>
         <ul className={`mt-2 list-disc space-y-1 pl-5 text-sm leading-5 ${toneClasses.text}`}>
           {visiblePoints.map((point, index) => (
@@ -1808,6 +1829,106 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
               {!resultsCollapsed && (
               <div className="divide-y divide-slate-100 border-t border-slate-100">
 
+
+              {/* Sections: QA + Monte Carlo */}
+              {allRevealed && hitlMode === 'approved' && (
+                <>
+                  <div className="flex flex-col">
+                  {/* QA section */}
+                  <div id="business-qa-check" className="order-2 px-5 py-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Business QA Check</p>
+                        <p className="mt-1 text-sm text-slate-600">This section stays separate from generated scenarios and consolidates all market reasoning into the two review buckets below.</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {approvalEvaluation ? (
+                          <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
+                            {approvalEvaluation.approved_market_count} markets
+                          </span>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => setQaSectionCollapsed((prev) => !prev)}
+                          className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-[#9c7a4a] hover:text-[#7b5c33]"
+                        >
+                          {qaSectionCollapsed ? 'Expand ▼' : 'Collapse ▲'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {!qaSectionCollapsed && approvalLoading && (
+                      <div className="mt-4 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+                        <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-[#7b5c33]" />
+                        <div>
+                          <p className="text-sm font-semibold text-slate-700">Checking approved actions</p>
+                          <p className="mt-0.5 text-xs text-slate-500">Looking for cases where high-elasticity markets are being cut or low-efficiency markets are being pushed.</p>
+                        </div>
+                      </div>
+                    )}
+
+                    {!qaSectionCollapsed && approvalError ? <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{approvalError}</p> : null}
+
+                    {!qaSectionCollapsed && approvalEvaluation && (
+                      <div className="mt-4 space-y-4">
+
+                        {/* Reasoning — what Trinity understood from the prompt */}
+                        <div className="rounded-2xl border border-[#e8ddd0] bg-[#faf6f0] px-4 py-4">
+                          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8c7554]">What Trinity Understood</p>
+                          <p className="mt-2 text-sm font-semibold text-slate-800 leading-5">{interp?.goal || prompt}</p>
+                          {interp?.reasoning && (
+                            <p className="mt-2 text-sm leading-6 text-slate-600">{interp.reasoning}</p>
+                          )}
+                          {(interp?.assumptions ?? []).length > 0 && (
+                            <div className="mt-3 space-y-1">
+                              {(interp?.assumptions ?? []).map((a, i) => (
+                                <p key={i} className="text-xs text-slate-500 leading-4">· {a}</p>
+                              ))}
+                            </div>
+                          )}
+                          {approvalHeadline && (
+                            <p className="mt-3 text-xs font-semibold text-[#7b5c33] leading-5">{approvalHeadline}</p>
+                          )}
+                        </div>
+
+                        <div className="grid gap-3 lg:grid-cols-3">
+                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
+                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-700">Supported</p>
+                            <p className="mt-2 text-3xl font-semibold text-emerald-800">{supportedReviews.length}</p>
+                            <p className="mt-1 text-xs text-emerald-700">Actions where the economics line up with the recommendation.</p>
+                          </div>
+                          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
+                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-amber-700">Mixed</p>
+                            <p className="mt-2 text-3xl font-semibold text-amber-800">{mixedReviews.length}</p>
+                            <p className="mt-1 text-xs text-amber-700">Actions with both support and caution signals.</p>
+                          </div>
+                          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4">
+                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-rose-700">At Risk</p>
+                            <p className="mt-2 text-3xl font-semibold text-rose-800">{atRiskReviews.length}</p>
+                            <p className="mt-1 text-xs text-rose-700">Actions where responsiveness or salience conflicts with the recommendation.</p>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-3 lg:grid-cols-2">
+                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
+                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-700">What Supports The Plan</p>
+                            <div className="mt-3 grid max-h-[34rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
+                              {supportPlanReviews.length > 0
+                                ? supportPlanReviews.map((review) => renderApprovalReasonBlock(review, 'support'))
+                                : <p className="text-sm text-emerald-800">No support signals available.</p>}
+                            </div>
+                          </div>
+                          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4">
+                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-rose-700">What Needs Review</p>
+                            <div className="mt-3 grid max-h-[34rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
+                              {needsReviewPlanReviews.length > 0
+                                ? needsReviewPlanReviews.map((review) => renderApprovalReasonBlock(review, 'review'))
+                                : <p className="text-sm text-rose-800">No review flags available.</p>}
+                            </div>
+                          </div>
+                        </div>
+
+
               {/* Section: Interpretation Steps + Scoring Grid — collapsed by default */}
               <div className="px-5 py-3">
               {/* Toggle */}
@@ -2051,104 +2172,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 </div>
               )}
               </div>
-
-              {/* Sections: QA + Monte Carlo */}
-              {allRevealed && hitlMode === 'approved' && (
-                <>
-                  <div className="flex flex-col">
-                  {/* QA section */}
-                  <div id="business-qa-check" className="order-2 px-5 py-5">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Business QA Check</p>
-                        <p className="mt-1 text-sm text-slate-600">This section stays separate from generated scenarios and consolidates all market reasoning into the two review buckets below.</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {approvalEvaluation ? (
-                          <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
-                            {approvalEvaluation.approved_market_count} markets
-                          </span>
-                        ) : null}
-                        <button
-                          type="button"
-                          onClick={() => setQaSectionCollapsed((prev) => !prev)}
-                          className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-[#9c7a4a] hover:text-[#7b5c33]"
-                        >
-                          {qaSectionCollapsed ? 'Expand ▼' : 'Collapse ▲'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {!qaSectionCollapsed && approvalLoading && (
-                      <div className="mt-4 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-                        <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-[#7b5c33]" />
-                        <div>
-                          <p className="text-sm font-semibold text-slate-700">Checking approved actions</p>
-                          <p className="mt-0.5 text-xs text-slate-500">Looking for cases where high-elasticity markets are being cut or low-efficiency markets are being pushed.</p>
-                        </div>
-                      </div>
-                    )}
-
-                    {!qaSectionCollapsed && approvalError ? <p className="mt-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">{approvalError}</p> : null}
-
-                    {!qaSectionCollapsed && approvalEvaluation && (
-                      <div className="mt-4 space-y-4">
-
-                        {/* Reasoning — what Trinity understood from the prompt */}
-                        <div className="rounded-2xl border border-[#e8ddd0] bg-[#faf6f0] px-4 py-4">
-                          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8c7554]">What Trinity Understood</p>
-                          <p className="mt-2 text-sm font-semibold text-slate-800 leading-5">{interp?.goal || prompt}</p>
-                          {interp?.reasoning && (
-                            <p className="mt-2 text-sm leading-6 text-slate-600">{interp.reasoning}</p>
-                          )}
-                          {(interp?.assumptions ?? []).length > 0 && (
-                            <div className="mt-3 space-y-1">
-                              {(interp?.assumptions ?? []).map((a, i) => (
-                                <p key={i} className="text-xs text-slate-500 leading-4">· {a}</p>
-                              ))}
-                            </div>
-                          )}
-                          {approvalHeadline && (
-                            <p className="mt-3 text-xs font-semibold text-[#7b5c33] leading-5">{approvalHeadline}</p>
-                          )}
-                        </div>
-
-                        <div className="grid gap-3 lg:grid-cols-3">
-                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-700">Supported</p>
-                            <p className="mt-2 text-3xl font-semibold text-emerald-800">{supportedReviews.length}</p>
-                            <p className="mt-1 text-xs text-emerald-700">Actions where the economics line up with the recommendation.</p>
-                          </div>
-                          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-amber-700">Mixed</p>
-                            <p className="mt-2 text-3xl font-semibold text-amber-800">{mixedReviews.length}</p>
-                            <p className="mt-1 text-xs text-amber-700">Actions with both support and caution signals.</p>
-                          </div>
-                          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-rose-700">At Risk</p>
-                            <p className="mt-2 text-3xl font-semibold text-rose-800">{atRiskReviews.length}</p>
-                            <p className="mt-1 text-xs text-rose-700">Actions where responsiveness or salience conflicts with the recommendation.</p>
-                          </div>
-                        </div>
-
-                        <div className="grid gap-3 lg:grid-cols-2">
-                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-700">What Supports The Plan</p>
-                            <div className="mt-3 grid max-h-[34rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
-                              {supportPlanReviews.length > 0
-                                ? supportPlanReviews.map((review) => renderApprovalReasonBlock(review, 'support'))
-                                : <p className="text-sm text-emerald-800">No support signals available.</p>}
-                            </div>
-                          </div>
-                          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-rose-700">What Needs Review</p>
-                            <div className="mt-3 grid max-h-[34rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
-                              {needsReviewPlanReviews.length > 0
-                                ? needsReviewPlanReviews.map((review) => renderApprovalReasonBlock(review, 'review'))
-                                : <p className="text-sm text-rose-800">No review flags available.</p>}
-                            </div>
-                          </div>
-                        </div>
 
                         <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4">
                           <div>
