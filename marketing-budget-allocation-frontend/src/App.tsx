@@ -5054,9 +5054,6 @@ function App() {
             </div>
           </div>
 
-          <div className="hidden rounded-full border border-[#ddd4c6] bg-[#fbf8f1] px-4 py-2 sm:block">
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[#8c7554]">Portfolio Allocation Workspace</p>
-          </div>
         </div>
       </header>
 
