@@ -1308,15 +1308,44 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       [],
     ]
     const marketRows = [
-      ['Market', 'Old Spend', 'New Spend', 'Old Reach Share %', 'New Reach Share %', 'New Budget Share %'],
-      ...plan.markets.map((row) => [
-        row.market,
-        Number(row.old_total_spend ?? 0),
-        Number(row.new_total_spend ?? 0),
-        row.fy25_reach_share_pct ?? '',
-        row.new_reach_share_pct ?? '',
-        Number(row.new_budget_share ?? 0) * 100,
-      ]),
+      [
+        'Market',
+        'Old Total Spend', 'New Total Spend',
+        'Old TV Spend', 'New TV Spend',
+        'Old Digital Spend', 'New Digital Spend',
+        'TV Spend Share % (Before)', 'TV Spend Share % (After)',
+        'Digital Spend Share % (Before)', 'Digital Spend Share % (After)',
+        'Old Reach Share %', 'New Reach Share %',
+        'New Budget Share %',
+      ],
+      ...plan.markets.map((row) => {
+        const oldTvSpend = (Number(row.fy25_tv_reach ?? 0)) * (Number(row.tv_cpr ?? 0))
+        const oldDigSpend = (Number(row.fy25_digital_reach ?? 0)) * (Number(row.digital_cpr ?? 0))
+        const newTvSpend = Number(row.new_total_tv_spend ?? 0)
+        const newDigSpend = Number(row.new_total_digital_spend ?? 0)
+        const oldTotal = oldTvSpend + oldDigSpend
+        const newTotal = newTvSpend + newDigSpend
+        const oldTvSharePct = oldTotal > 0 ? Number(((oldTvSpend / oldTotal) * 100).toFixed(2)) : ''
+        const newTvSharePct = newTotal > 0 ? Number(((newTvSpend / newTotal) * 100).toFixed(2)) : ''
+        const oldDigSharePct = oldTotal > 0 ? Number((((oldDigSpend) / oldTotal) * 100).toFixed(2)) : ''
+        const newDigSharePct = newTotal > 0 ? Number((((newDigSpend) / newTotal) * 100).toFixed(2)) : ''
+        return [
+          row.market,
+          Number(row.old_total_spend ?? 0),
+          Number(row.new_total_spend ?? 0),
+          Number(oldTvSpend.toFixed(0)),
+          Number(newTvSpend.toFixed(0)),
+          Number(oldDigSpend.toFixed(0)),
+          Number(newDigSpend.toFixed(0)),
+          oldTvSharePct,
+          newTvSharePct,
+          oldDigSharePct,
+          newDigSharePct,
+          row.fy25_reach_share_pct ?? '',
+          row.new_reach_share_pct ?? '',
+          Number(row.new_budget_share ?? 0) * 100,
+        ]
+      }),
     ]
     return [...headerRows, ...marketRows]
       .map((row) => row.map((cell) => escapeCsvValue(cell)).join(','))
