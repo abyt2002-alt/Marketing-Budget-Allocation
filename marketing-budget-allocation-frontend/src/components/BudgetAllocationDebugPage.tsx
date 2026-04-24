@@ -258,6 +258,22 @@ type ScenarioReachFilter = {
   direction: 'higher' | 'lower' | 'equal'
 }
 
+type ModalSCurvePoint = {
+  scale: number
+  pct_change_input: number
+  predicted_volume: number
+  predicted_spend: number
+  tv_reach?: number
+  digital_reach?: number
+}
+
+type ModalSCurveData = {
+  tv: ModalSCurvePoint[]
+  digital: ModalSCurvePoint[]
+  baseline_tv_reach?: number
+  baseline_digital_reach?: number
+}
+
 type SavedScenarioPlan = {
   saved_at: string
   brand: string
@@ -439,6 +455,10 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [scenarioModalSortBy, setScenarioModalSortBy] = useState<'budget_delta' | 'brand_salience' | 'market_share_change'>('budget_delta')
   const [scenarioModalChangeFilter, setScenarioModalChangeFilter] = useState<'all' | 'increase' | 'decrease'>('all')
   const [scenarioMarketDetailRow, setScenarioMarketDetailRow] = useState<(ScenarioMarketRow & { deltaBudget: number }) | null>(null)
+  const [modalSCurveChannel, setModalSCurveChannel] = useState<'tv' | 'digital' | null>(null)
+  const [modalSCurveData, setModalSCurveData] = useState<ModalSCurveData | null>(null)
+  const [modalSCurveLoading, setModalSCurveLoading] = useState(false)
+  const [modalSCurveError, setModalSCurveError] = useState('')
   const [scoringGridCollapsed, setScoringGridCollapsed] = useState(true)
   const [stepsCollapsed, setStepsCollapsed] = useState(true)
   const [scenarioPlanMessage, setScenarioPlanMessage] = useState('')
@@ -765,6 +785,29 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   function setZoomReachFilter(index: number, patch: Partial<ScenarioReachFilter>) {
     setZoomReachFilters((prev) => prev.map((item, itemIndex) => (itemIndex === index ? { ...item, ...patch } : item)))
     setZoomPage(1)
+  }
+
+  async function fetchModalSCurves(market: string) {
+    if (!brand) return
+    setModalSCurveLoading(true)
+    setModalSCurveError('')
+    setModalSCurveData(null)
+    try {
+      const res = await axios.post<{ curves: { tv: ModalSCurvePoint[]; digital: ModalSCurvePoint[] }; summary: { baseline_tv_reach?: number; baseline_digital_reach?: number } }>(
+        `${apiBaseUrl}/api/s-curves-auto`,
+        { selected_brand: brand, selected_markets: [market], points: 41, min_scale: 0.2, max_scale: 2.5 },
+      )
+      setModalSCurveData({
+        tv: res.data.curves.tv,
+        digital: res.data.curves.digital,
+        baseline_tv_reach: res.data.summary.baseline_tv_reach,
+        baseline_digital_reach: res.data.summary.baseline_digital_reach,
+      })
+    } catch {
+      setModalSCurveError('Failed to load S-curve.')
+    } finally {
+      setModalSCurveLoading(false)
+    }
   }
 
   function renderMarketControlPanel(
@@ -3697,6 +3740,79 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       {/* TV / Digital split detail sub-modal */}
       {scenarioMarketDetailRow && (() => {
         const r = scenarioMarketDetailRow
+        const activeCurvePoints = modalSCurveChannel === 'tv' ? (modalSCurveData?.tv ?? []) : (modalSCurveData?.digital ?? [])
+        const baselineReach = modalSCurveChannel === 'tv' ? modalSCurveData?.baseline_tv_reach : modalSCurveData?.baseline_digital_reach
+        const xKey = modalSCurveChannel === 'tv' ? 'tv_reach' : 'digital_reach'
+        const curveColor = modalSCurveChannel === 'tv' ? '#3b82f6' : '#a855f7'
+
+        const getPointX = (p: ModalSCurvePoint) => {
+          const raw = xKey === 'tv_reach' ? p.tv_reach : p.digital_reach
+          if (raw != null && Number.isFinite(raw) && Number(raw) > 0) return Number(raw)
+          const base = Number(baselineReach)
+          if (Number.isFinite(base) && base > 0) return base * Number(p.scale)
+          return 0
+        }
+
+        const renderSCurveChart = () => {
+          if (modalSCurveLoading) return (
+            <div className="flex items-center justify-center py-10 text-slate-400 text-sm gap-2">
+              <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-blue-500" />
+              Loading S-curve…
+            </div>
+          )
+          if (modalSCurveError) return <p className="py-6 text-center text-sm text-rose-600">{modalSCurveError}</p>
+          if (!modalSCurveData || activeCurvePoints.length === 0) return (
+            <p className="py-6 text-center text-sm text-slate-400">No curve data available.</p>
+          )
+          const W = 520, H = 200, L = 44, R = 12, T = 12, B = 36
+          const pw = W - L - R, ph = H - T - B
+          const xs = activeCurvePoints.map(getPointX)
+          const ys = activeCurvePoints.map(p => p.predicted_volume)
+          const xMin = Math.min(...xs), xMax = Math.max(...xs)
+          const yMin = Math.min(...ys), yMax = Math.max(...ys)
+          const xPad = Math.max(1, (xMax - xMin) * 0.05)
+          const yPad = Math.max(0.1, (yMax - yMin) * 0.1)
+          const mx = (x: number) => L + ((x - (xMin - xPad)) / Math.max(1e-9, (xMax + xPad) - (xMin - xPad))) * pw
+          const my = (y: number) => T + (((yMax + yPad) - y) / Math.max(1e-9, (yMax + yPad) - (yMin - yPad))) * ph
+          const linePath = activeCurvePoints.map((p, i) => `${i === 0 ? 'M' : 'L'} ${mx(getPointX(p)).toFixed(1)} ${my(p.predicted_volume).toFixed(1)}`).join(' ')
+          const areaPath = `${linePath} L ${mx(getPointX(activeCurvePoints[activeCurvePoints.length - 1])).toFixed(1)} ${(T + ph).toFixed(1)} L ${mx(getPointX(activeCurvePoints[0])).toFixed(1)} ${(T + ph).toFixed(1)} Z`
+          const baselinePoint = activeCurvePoints.reduce((best, curr) => Math.abs(curr.pct_change_input) < Math.abs(best.pct_change_input) ? curr : best)
+          const bx = mx(getPointX(baselinePoint)), by = my(baselinePoint.predicted_volume)
+          const yTicks = Array.from({ length: 4 }, (_, i) => yMin + (i / 3) * (yMax - yMin))
+          const xTicks = Array.from({ length: 4 }, (_, i) => xMin + (i / 3) * (xMax - xMin))
+          return (
+            <svg viewBox={`0 0 ${W} ${H}`} className="w-full" style={{ height: 180 }}>
+              <defs>
+                <linearGradient id="mcg" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={curveColor} stopOpacity="0.18" />
+                  <stop offset="100%" stopColor={curveColor} stopOpacity="0.02" />
+                </linearGradient>
+              </defs>
+              {/* Grid lines */}
+              {yTicks.map((y, i) => <line key={i} x1={L} x2={W - R} y1={my(y).toFixed(1)} y2={my(y).toFixed(1)} stroke="#e2e8f0" strokeWidth="1" />)}
+              {/* Area */}
+              <path d={areaPath} fill="url(#mcg)" />
+              {/* Curve */}
+              <path d={linePath} fill="none" stroke={curveColor} strokeWidth="2" strokeLinejoin="round" />
+              {/* Baseline dot */}
+              <circle cx={bx.toFixed(1)} cy={by.toFixed(1)} r="4" fill={curveColor} />
+              <line x1={bx.toFixed(1)} x2={bx.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1" strokeDasharray="3 3" opacity="0.5" />
+              {/* Y axis ticks */}
+              {yTicks.map((y, i) => (
+                <text key={i} x={L - 4} y={my(y) + 4} textAnchor="end" fontSize="9" fill="#94a3b8">
+                  {y > 1e6 ? `${(y / 1e6).toFixed(1)}M` : y > 1e3 ? `${(y / 1e3).toFixed(0)}K` : y.toFixed(0)}
+                </text>
+              ))}
+              {/* X axis ticks */}
+              {xTicks.map((x, i) => (
+                <text key={i} x={mx(x)} y={H - 6} textAnchor="middle" fontSize="9" fill="#94a3b8">
+                  {x > 1e6 ? `${(x / 1e6).toFixed(1)}M` : x > 1e3 ? `${(x / 1e3).toFixed(0)}K` : x.toFixed(0)}
+                </text>
+              ))}
+              <text x={W / 2} y={H - 0} textAnchor="middle" fontSize="9" fill="#94a3b8">{modalSCurveChannel === 'tv' ? 'TV Reach' : 'Digital Reach'}</text>
+            </svg>
+          )
+        }
         const oldTvSpend = (Number(r.fy25_tv_reach ?? 0)) * (Number(r.tv_cpr ?? 0))
         const oldDigSpend = (Number(r.fy25_digital_reach ?? 0)) * (Number(r.digital_cpr ?? 0))
         const newTvSpend = Number(r.new_total_tv_spend ?? 0)
@@ -3718,10 +3834,10 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
         return (
           <div
             className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm"
-            onClick={() => setScenarioMarketDetailRow(null)}
+            onClick={() => { setScenarioMarketDetailRow(null); setModalSCurveChannel(null); setModalSCurveData(null) }}
           >
             <div
-              className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white shadow-2xl mx-4"
+              className={`w-full rounded-2xl border border-slate-200 bg-white shadow-2xl mx-4 transition-all ${modalSCurveChannel ? 'max-w-2xl' : 'max-w-lg'}`}
               onClick={e => e.stopPropagation()}
             >
               {/* Header */}
@@ -3768,9 +3884,17 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-blue-600">TV vs Digital Budget Split</p>
                   <div className="grid grid-cols-2 gap-3">
                     {/* TV */}
-                    <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = modalSCurveChannel === 'tv' ? null : 'tv'
+                        setModalSCurveChannel(next)
+                        if (next && !modalSCurveData) void fetchModalSCurves(r.market)
+                      }}
+                      className={`rounded-xl border p-3 text-left transition w-full ${modalSCurveChannel === 'tv' ? 'border-blue-400 bg-blue-50 ring-2 ring-blue-200' : 'border-blue-100 bg-blue-50/40 hover:border-blue-300'}`}
+                    >
                       <div className="flex items-center justify-between">
-                        <p className="text-xs font-bold text-blue-700">TV</p>
+                        <p className="text-xs font-bold text-blue-700">TV {modalSCurveChannel === 'tv' ? '▲' : '→ S-Curve'}</p>
                         <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${badgeBg(tvDelta)}`}>
                           {tvDelta !== 0 ? signed(tvDelta) : '—'}
                         </span>
@@ -3793,12 +3917,20 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                           Reach mix: {formatMetric(oldTvReachPct, 1)}% → <span className={deltaColor(newTvReachPct - oldTvReachPct)}>{formatMetric(newTvReachPct, 1)}%</span>
                         </p>
                       )}
-                    </div>
+                    </button>
 
                     {/* Digital */}
-                    <div className="rounded-xl border border-purple-100 bg-purple-50/40 p-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const next = modalSCurveChannel === 'digital' ? null : 'digital'
+                        setModalSCurveChannel(next)
+                        if (next && !modalSCurveData) void fetchModalSCurves(r.market)
+                      }}
+                      className={`rounded-xl border p-3 text-left transition w-full ${modalSCurveChannel === 'digital' ? 'border-purple-400 bg-purple-50 ring-2 ring-purple-200' : 'border-purple-100 bg-purple-50/40 hover:border-purple-300'}`}
+                    >
                       <div className="flex items-center justify-between">
-                        <p className="text-xs font-bold text-purple-700">Digital</p>
+                        <p className="text-xs font-bold text-purple-700">Digital {modalSCurveChannel === 'digital' ? '▲' : '→ S-Curve'}</p>
                         <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${badgeBg(digDelta)}`}>
                           {digDelta !== 0 ? signed(digDelta) : '—'}
                         </span>
@@ -3821,9 +3953,19 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                           Reach mix: {formatMetric(oldDigReachPct, 1)}% → <span className={deltaColor(newDigReachPct - oldDigReachPct)}>{formatMetric(newDigReachPct, 1)}%</span>
                         </p>
                       )}
-                    </div>
+                    </button>
                   </div>
                 </div>
+
+                {/* S-Curve chart */}
+                {modalSCurveChannel && (
+                  <div className="rounded-xl border border-slate-200 bg-white p-3">
+                    <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: curveColor }}>
+                      {modalSCurveChannel === 'tv' ? 'TV' : 'Digital'} S-Curve — {r.market}
+                    </p>
+                    {renderSCurveChart()}
+                  </div>
+                )}
               </div>
             </div>
           </div>
