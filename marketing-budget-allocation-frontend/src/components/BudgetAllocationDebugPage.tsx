@@ -461,6 +461,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [scenarioMarketDetailRow, setScenarioMarketDetailRow] = useState<(ScenarioMarketRow & { deltaBudget: number }) | null>(null)
   const [modalSCurveChannel, setModalSCurveChannel] = useState<'tv' | 'digital' | null>(null)
   const [modalSCurveData, setModalSCurveData] = useState<ModalSCurveData | null>(null)
+  const [modalSCurveMarket, setModalSCurveMarket] = useState<string | null>(null)
   const [modalSCurveLoading, setModalSCurveLoading] = useState(false)
   const [modalSCurveError, setModalSCurveError] = useState('')
   const [scoringGridCollapsed, setScoringGridCollapsed] = useState(true)
@@ -791,8 +792,17 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     setZoomPage(1)
   }
 
+  function closeMarketDetailModal() {
+    setScenarioMarketDetailRow(null)
+    setModalSCurveChannel(null)
+    setModalSCurveData(null)
+    setModalSCurveMarket(null)
+    setModalSCurveError('')
+  }
+
   async function fetchModalSCurves(market: string) {
     if (!brand) return
+    setModalSCurveMarket(market)
     setModalSCurveLoading(true)
     setModalSCurveError('')
     setModalSCurveData(null)
@@ -3876,7 +3886,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
         return (
           <div
             className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm"
-            onClick={() => { setScenarioMarketDetailRow(null); setModalSCurveChannel(null); setModalSCurveData(null) }}
+            onClick={() => closeMarketDetailModal()}
           >
             <div
               className={`w-full rounded-2xl border border-slate-200 bg-white shadow-2xl mx-4 transition-all ${modalSCurveChannel ? 'max-w-2xl' : 'max-w-lg'}`}
@@ -3894,7 +3904,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   </span>
                   <button
                     type="button"
-                    onClick={() => setScenarioMarketDetailRow(null)}
+                    onClick={() => closeMarketDetailModal()}
                     className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-500 hover:bg-slate-50"
                   >
                     ✕
@@ -3931,7 +3941,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       onClick={() => {
                         const next = modalSCurveChannel === 'tv' ? null : 'tv'
                         setModalSCurveChannel(next)
-                        if (next && !modalSCurveData) void fetchModalSCurves(r.market)
+                        if (next && (modalSCurveMarket !== r.market || !modalSCurveData)) void fetchModalSCurves(r.market)
                       }}
                       className={`rounded-xl border p-3 text-left transition w-full ${modalSCurveChannel === 'tv' ? 'border-blue-400 bg-blue-50 ring-2 ring-blue-200' : 'border-blue-100 bg-blue-50/40 hover:border-blue-300'}`}
                     >
@@ -3967,7 +3977,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       onClick={() => {
                         const next = modalSCurveChannel === 'digital' ? null : 'digital'
                         setModalSCurveChannel(next)
-                        if (next && !modalSCurveData) void fetchModalSCurves(r.market)
+                        if (next && (modalSCurveMarket !== r.market || !modalSCurveData)) void fetchModalSCurves(r.market)
                       }}
                       className={`rounded-xl border p-3 text-left transition w-full ${modalSCurveChannel === 'digital' ? 'border-purple-400 bg-purple-50 ring-2 ring-purple-200' : 'border-purple-100 bg-purple-50/40 hover:border-purple-300'}`}
                     >
