@@ -438,6 +438,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [scenarioModalChangeFilter, setScenarioModalChangeFilter] = useState<'all' | 'increase' | 'decrease'>('all')
   const [scenarioMarketDetailRow, setScenarioMarketDetailRow] = useState<(ScenarioMarketRow & { deltaBudget: number }) | null>(null)
   const [scoringGridCollapsed, setScoringGridCollapsed] = useState(true)
+  const [stepsCollapsed, setStepsCollapsed] = useState(true)
   const [scenarioPlanMessage, setScenarioPlanMessage] = useState('')
   const [savedScenarioPlans, setSavedScenarioPlans] = useState<SavedScenarioPlan[]>([])
   const [savedPlansOpen, setSavedPlansOpen] = useState(false)
@@ -650,10 +651,39 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       })
       setResult(res.data)
       setFeedbackText('')
-      setHitlMode('review')
       const steps = res.data.normalized_interpretation?.steps ?? []
       startReveal(steps)
       setSetupCollapsed(true)
+      setStepsCollapsed(true)
+      // Auto-approve: skip "Does this look right?" and go straight to QA
+      const freshInterp = res.data.normalized_interpretation
+      if (freshInterp && brand) {
+        setHitlMode('approved')
+        setApprovalLoading(true)
+        setApprovalEvaluation(null)
+        setApprovalError('')
+        setScenarioHandoff(null)
+        setScenarioHandoffError('')
+        try {
+          const evalRes = await axios.post<ApprovedPlanEvaluationResponse>(`${apiBaseUrl}/api/scenarios/intent/evaluate-approved`, {
+            selected_brand: brand,
+            selected_markets: markets,
+            budget_increase_type: 'percentage',
+            budget_increase_value: budgetIncreasePct,
+            market_overrides: {},
+            intent_prompt: prompt,
+            approved_interpretation: freshInterp,
+          })
+          setApprovalEvaluation(evalRes.data)
+          await prepareScenarioHandoff(freshInterp)
+        } catch {
+          setApprovalError('Failed to evaluate the approved plan.')
+        } finally {
+          setApprovalLoading(false)
+        }
+      } else {
+        setHitlMode('review')
+      }
     } catch (err) {
       setPhase('idle')
       setHitlMode('review')
@@ -1778,14 +1808,23 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
               {!resultsCollapsed && (
               <div className="divide-y divide-slate-100 border-t border-slate-100">
 
-              {/* Section: Interpretation Steps + Scoring Grid */}
-              <div className="px-5 py-5">
-              {/* Goal */}
-              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">Interpreted Goal</p>
-              <p className="mt-1.5 text-sm font-medium text-slate-800 leading-5">{interp.goal || prompt}</p>
+              {/* Section: Interpretation Steps + Scoring Grid — collapsed by default */}
+              <div className="px-5 py-3">
+              {/* Toggle */}
+              <button
+                type="button"
+                onClick={() => setStepsCollapsed(prev => !prev)}
+                className="flex w-full items-center justify-between rounded-xl border border-[#e8ddd0] bg-[#faf6f0] px-3 py-2.5 text-left transition hover:bg-[#f5ede0]"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-[0.14em] text-[#8c7554]">How Trinity Interpreted This</span>
+                  <span className="rounded-full bg-[#e8ddd0] px-2 py-0.5 text-[10px] font-semibold text-[#7b5c33]">{steps.length} steps · {finalMarkets.length} markets</span>
+                </div>
+                <span className="text-xs font-semibold text-[#8c7554]">{stepsCollapsed ? 'Show ▼' : 'Hide ▲'}</span>
+              </button>
 
-              {/* Step pipeline */}
-              <div className="mt-4 space-y-1.5">
+              {!stepsCollapsed && (
+              <div className="mt-3 space-y-1.5">
                 <p className="text-[11px] font-medium text-slate-400">Click any step to inspect how the filter worked.</p>
                 {interp.is_multi_segment ? (
                   <>
@@ -1936,6 +1975,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   </>
                 )}
               </div>
+              )}
 
               {/* 5-Column Market Scoring Grid — collapsible */}
               {showScoringGrid && (
@@ -2012,117 +2052,9 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
               )}
               </div>
 
-              {/* Section: HITL */}
-              {allRevealed && hitl && hitlMode !== 'approved' && (
-                <div className="px-5 py-5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex-1">
-                      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Does this look right?</p>
-                      <p className="mt-1.5 text-sm text-slate-700 leading-5">{hitl.summary}</p>
-                      {hitl.review_reason.length > 0 && (
-                        <div className="mt-2 space-y-1">
-                          {hitl.review_reason.map((r, i) => (
-                            <p key={i} className="text-xs text-amber-700 leading-4">⚠ {r}</p>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <span className={`shrink-0 text-lg font-bold tabular-nums ${confColor}`}>
-                      {confidencePct}%
-                    </span>
-                  </div>
-
-                  {hitlMode === 'review' && (
-                    <div className="mt-4 flex gap-2.5">
-                      <button
-                        type="button" onClick={() => { void handleApprove() }}
-                        className="flex-1 rounded-full bg-emerald-600 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-700"
-                      >
-                        ✓ Looks good, continue
-                      </button>
-                      <button
-                        type="button" onClick={() => setHitlMode('feedback')}
-                        className="flex-1 rounded-full border border-[#d7cbb7] bg-white py-2.5 text-sm font-semibold text-slate-700 transition hover:border-[#9c7a4a] hover:text-[#7b5c33]"
-                      >
-                        ✏ Refine this
-                      </button>
-                    </div>
-                  )}
-
-                  {hitlMode === 'feedback' && (
-                    <div className="mt-4 space-y-2.5">
-                      {feedbackLoading ? (
-                        <div className="rounded-2xl border border-[#d7cbb7] bg-[#faf6f0] px-4 py-4">
-                          <div className="flex items-center gap-3">
-                            <span className="inline-block h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[#c9b79b] border-t-[#7b5c33]" />
-                            <p className="text-sm font-semibold text-[#7b5c33]">Revising interpretation…</p>
-                          </div>
-                          <p className="mt-2 text-xs text-slate-500 leading-4 pl-7">
-                            Applying your correction and freezing all other markets.
-                          </p>
-                          {feedbackText.trim() && (
-                            <p className="mt-2 rounded-xl border border-[#e8ddd0] bg-white px-3 py-2 text-xs italic text-slate-600 leading-4 ml-7">
-                              "{feedbackText.trim()}"
-                            </p>
-                          )}
-                        </div>
-                      ) : (
-                        <>
-                          <textarea
-                            rows={3}
-                            value={feedbackText}
-                            onChange={(e) => setFeedbackText(e.target.value)}
-                            placeholder="e.g. I meant top 5 markets by category salience, not low category salience…"
-                            className="w-full resize-none rounded-2xl border border-[#d7cbb7] bg-white px-3 py-2.5 text-sm leading-6 text-slate-700 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
-                            autoFocus
-                          />
-                          <div className="flex gap-2">
-                            <button
-                              type="button" onClick={() => run('revise', feedbackText)}
-                              disabled={!feedbackText.trim()}
-                              className="flex-1 rounded-full bg-[#7b5c33] py-2 text-sm font-semibold text-white transition hover:bg-[#6c4f2a] disabled:bg-slate-300"
-                            >
-                              Send to Trinity →
-                            </button>
-                            <button
-                              type="button" onClick={() => setHitlMode('review')}
-                              className="rounded-full border border-[#d7cbb7] bg-white px-4 py-2 text-sm text-slate-500 hover:text-slate-700"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Sections: Approved banner + QA + Monte Carlo */}
+              {/* Sections: QA + Monte Carlo */}
               {allRevealed && hitlMode === 'approved' && (
                 <>
-                  {/* Approved banner */}
-                  <div className="flex items-center gap-3 bg-emerald-50/50 px-5 py-4">
-                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">✓</span>
-                    <div>
-                      <p className="text-sm font-semibold text-emerald-700">Interpretation approved</p>
-                      <p className="text-xs text-slate-500 mt-0.5">{finalMarkets.length} market{finalMarkets.length !== 1 ? 's' : ''} · {interp?.is_multi_segment ? 'multi-segment plan' : `${interp?.action_direction} spend`}</p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setHitlMode('review')
-                        setApprovalEvaluation(null)
-                        setApprovalError('')
-                        setScenarioHandoff(null)
-                        setScenarioHandoffError('')
-                      }}
-                      className="ml-auto rounded-full border border-[#d7cbb7] px-3 py-1 text-xs text-slate-500 hover:text-slate-700"
-                    >
-                      Revise
-                    </button>
-                  </div>
-
                   <div className="flex flex-col">
                   {/* QA section */}
                   <div id="business-qa-check" className="order-2 px-5 py-5">
