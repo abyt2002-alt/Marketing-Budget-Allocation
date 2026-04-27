@@ -850,16 +850,7 @@ type AppSnapshotPayload = {
   scenarioFlowSortKey: 'share' | 'spend'
 }
 
-// Brand display name mapping — frontend only, does not affect API calls
-const BRAND_DISPLAY_MAP: Record<string, string> = {
-  'Aer Matic': 'Lumière Noir',
-  'Aer O': 'Velvet Bloom',
-  'Aer PP': 'Cedar Mist',
-  'Aer Spray': 'Amber Dusk',
-  'Godrej Expert Rich Crème': 'Rosé Élite',
-  'Godrej Shampoo Hair Color': 'Oud Royale',
-}
-const displayBrand = (brand: string): string => BRAND_DISPLAY_MAP[brand] ?? brand
+import { displayBrand } from './utils/brandDisplay'
 
 const API_BASE_URL = (() => {
   const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim()

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
+import { displayBrand } from '../utils/brandDisplay'
 
 type AutoConfigResponse = {
   brands: string[]
@@ -1786,7 +1787,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                     onChange={(e) => { setBrand(e.target.value); setMarkets(config?.markets_by_brand[e.target.value] ?? []); setSetupCollapsed(false) }}
                     className="mt-2 w-full rounded-xl border border-[#d7cbb7] bg-white px-3 py-2 text-sm font-medium text-slate-800 outline-none focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
                   >
-                    {(config?.brands ?? []).map((b) => <option key={b} value={b}>{b}</option>)}
+                    {(config?.brands ?? []).map((b) => <option key={b} value={b}>{displayBrand(b)}</option>)}
                   </select>
                 </div>
 
@@ -1897,7 +1898,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
               onChange={(e) => { setBrand(e.target.value); setMarkets(config?.markets_by_brand[e.target.value] ?? []) }}
               className="mt-1.5 w-full rounded-xl border border-[#d7cbb7] bg-white px-3 py-2 text-sm text-slate-700 outline-none focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
             >
-              {(config?.brands ?? []).map((b) => <option key={b} value={b}>{b}</option>)}
+              {(config?.brands ?? []).map((b) => <option key={b} value={b}>{displayBrand(b)}</option>)}
             </select>
           </div>
 
