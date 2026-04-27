@@ -1199,6 +1199,14 @@ def _normalize_multi_segment_plan(
     all_matched = list({m for seg in segments for m in seg.get("matched_markets", [])})
     if conflict_resolutions:
         notes.append(f"{len(conflict_resolutions)} markets matched conflicting segment actions and were auto-resolved.")
+    reasoning = str(parsed.get("reasoning") or "").strip()
+    if not reasoning:
+        seg_summaries = [f"{s.get('label','segment')} ({len(s.get('matched_markets',[]))} markets, {s.get('action_direction','increase')})" for s in segments]
+        reasoning = (
+            f"This is a multi-condition strategy targeting {len(segments)} distinct market groups: {'; '.join(seg_summaries)}. "
+            f"Each group was identified using different performance signals from the data. "
+            f"The plan aims to tailor budget actions to the specific needs of each market cluster."
+        )
     return {
         "goal": str(parsed.get("goal") or prompt).strip() or prompt,
         "task_types": ["recommend", "filter"],
@@ -1210,7 +1218,7 @@ def _normalize_multi_segment_plan(
         "steps": [],
         "execution_order": [],
         "assumptions": parsed.get("assumptions") if isinstance(parsed.get("assumptions"), list) else [],
-        "reasoning": str(parsed.get("reasoning") or "").strip(),
+        "reasoning": reasoning,
         "matched_markets": all_matched,
         "market_dispositions": market_dispositions,
         "scoring_tiers": scoring_tiers,
@@ -1354,7 +1362,54 @@ def _normalize_interpretation(prompt: str, raw_parsed_json: dict[str, Any] | Non
         "market_dispositions": market_dispositions,
         "scoring_tiers": scoring_tiers,
     }
+    # If Gemini returned empty reasoning, generate it from the structured interpretation
+    if not interpretation.get("reasoning"):
+        interpretation["reasoning"] = _generate_reasoning_from_interpretation(interpretation, rows)
     return interpretation, notes
+
+
+def _generate_reasoning_from_interpretation(interp: dict[str, Any], rows: list[dict[str, Any]]) -> str:
+    """Build a plain-English explanation from the structured interpretation data."""
+    action = str(interp.get("action_direction") or "increase").strip()
+    matched = interp.get("matched_markets") or []
+    steps = interp.get("steps") or []
+    task_types = interp.get("task_types") or []
+
+    # Describe what filters/signals drove market selection
+    conditions: list[str] = []
+    for step in steps:
+        st = step.get("step_type", "")
+        label = step.get("metric_label") or step.get("left_metric_label") or ""
+        if st == "filter":
+            op = step.get("operator", "")
+            kind = step.get("kind", "")
+            if kind == "trend":
+                direction = "declining" if op in ("<", "<=") else "growing"
+                conditions.append(f"{direction} {label.lower()}")
+            elif st == "comparison":
+                right = step.get("right_metric_label", "")
+                conditions.append(f"{label.lower()} below {right.lower()}")
+            else:
+                conditions.append(f"{label.lower()} threshold")
+        elif st == "comparison":
+            right = step.get("right_metric_label", "")
+            conditions.append(f"{label.lower()} below {right.lower()}")
+        elif st == "ranking":
+            direction = step.get("direction", "descending")
+            limit = step.get("limit", "")
+            rank_dir = "highest" if direction == "descending" else "lowest"
+            conditions.append(f"top {limit} by {label.lower()}" if limit else f"{rank_dir} {label.lower()}")
+
+    strategy = "recommend" if "recommend" in task_types else action
+    market_count = len(matched)
+    cond_text = " and ".join(conditions) if conditions else "the specified criteria"
+    market_text = f"{market_count} market{'s' if market_count != 1 else ''}" if market_count else "the selected markets"
+
+    return (
+        f"The strategy identified is to {action} media investment in markets showing {cond_text}. "
+        f"{market_text.capitalize()} met these conditions based on the available performance data. "
+        f"The goal is to prioritise budget where market signals indicate the greatest need or opportunity for response."
+    )
 
 
 def _build_understanding_summary(interpretation: dict[str, Any], matched_markets: list[str]) -> str:

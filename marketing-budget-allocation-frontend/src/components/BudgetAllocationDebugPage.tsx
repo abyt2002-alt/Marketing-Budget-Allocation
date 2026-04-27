@@ -1764,7 +1764,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
 
           {setupCollapsed && phase !== 'idle' ? (
             <div className="flex flex-wrap items-center gap-2 px-5 py-3">
-              <span className="rounded-full bg-[#f4ece0] px-3 py-1 text-[11px] font-semibold text-[#7a5b31]">{brand || 'No brand'}</span>
+              <span className="rounded-full bg-[#f4ece0] px-3 py-1 text-[11px] font-semibold text-[#7a5b31]">{displayBrand(brand) || 'No brand'}</span>
               <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">{markets.length} markets</span>
               <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">Budget {formatSignedPct(budgetIncreasePct, 1)}</span>
               <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">Band {formatPlainNumber(scenarioRangeLowerPct, 1)}% to {formatPlainNumber(scenarioRangeUpperPct, 1)}%</span>
