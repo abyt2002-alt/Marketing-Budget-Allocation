@@ -2058,21 +2058,64 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       <div className="mt-4 space-y-4">
 
                         {/* Reasoning — what Trinity understood from the prompt */}
-                        <div className="rounded-2xl border border-[#e8ddd0] bg-[#faf6f0] px-4 py-4">
+                        <div className="rounded-2xl border border-[#e8ddd0] bg-[#faf6f0] px-4 py-5 space-y-3">
                           <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8c7554]">What Trinity Understood</p>
-                          <p className="mt-2 text-sm font-semibold text-slate-800 leading-5">{interp?.goal || prompt}</p>
-                          {interp?.reasoning && (
-                            <p className="mt-2 text-sm leading-6 text-slate-600">{interp.reasoning}</p>
-                          )}
-                          {(interp?.assumptions ?? []).length > 0 && (
-                            <div className="mt-3 space-y-1">
-                              {(interp?.assumptions ?? []).map((a, i) => (
-                                <p key={i} className="text-xs text-slate-500 leading-4">· {a}</p>
+
+                          {/* Strategy tags row */}
+                          {(interp?.task_types ?? []).length > 0 && (
+                            <div className="flex flex-wrap gap-2">
+                              {(interp?.task_types ?? []).map((t, i) => (
+                                <span key={i} className="inline-flex items-center rounded-full bg-[#f0e8d8] border border-[#ddd0bb] px-2.5 py-0.5 text-[11px] font-semibold text-[#7b5c33] uppercase tracking-wide">
+                                  {t.replace(/_/g, ' ')}
+                                </span>
                               ))}
+                              {interp?.action_direction && (
+                                <span className="inline-flex items-center rounded-full bg-slate-100 border border-slate-200 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600 uppercase tracking-wide">
+                                  {interp.action_direction}
+                                </span>
+                              )}
+                              {interp?.entity && (
+                                <span className="inline-flex items-center rounded-full bg-slate-100 border border-slate-200 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600 uppercase tracking-wide">
+                                  {interp.entity}
+                                </span>
+                              )}
                             </div>
                           )}
+
+                          {/* Main reasoning explanation */}
+                          {interp?.reasoning ? (
+                            <p className="text-sm leading-6 text-slate-700">{interp.reasoning}</p>
+                          ) : (
+                            <p className="text-sm leading-6 text-slate-700">{interp?.goal || prompt}</p>
+                          )}
+
+                          {/* Matched markets */}
+                          {(interp?.matched_markets ?? []).length > 0 && (
+                            <div>
+                              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8c7554] mb-1.5">Markets Identified</p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {(interp?.matched_markets ?? []).map((m, i) => (
+                                  <span key={i} className="rounded-md bg-white border border-[#ddd0bb] px-2 py-0.5 text-xs text-slate-600">{m}</span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Assumptions */}
+                          {(interp?.assumptions ?? []).length > 0 && (
+                            <div>
+                              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8c7554] mb-1.5">Assumptions Made</p>
+                              <div className="space-y-1">
+                                {(interp?.assumptions ?? []).map((a, i) => (
+                                  <p key={i} className="text-xs text-slate-500 leading-5">· {a}</p>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Approval headline */}
                           {approvalHeadline && (
-                            <p className="mt-3 text-xs font-semibold text-[#7b5c33] leading-5">{approvalHeadline}</p>
+                            <p className="text-xs font-semibold text-[#7b5c33] leading-5 border-t border-[#e8ddd0] pt-3">{approvalHeadline}</p>
                           )}
                         </div>
 
