@@ -5955,7 +5955,7 @@ Interpret the user prompt as clearly as possible.
 
 Return ONLY a JSON object with this structure:
 {{
-  "goal": "",
+  "goal": "one-line restatement of the business objective in your own words",
   "task_types": [],
   "metrics_referenced": [],
   "conditions": [],
@@ -5963,7 +5963,7 @@ Return ONLY a JSON object with this structure:
   "action_direction": "",
   "matched_markets": [],
   "assumptions": [],
-  "reasoning": ""
+  "reasoning": "2-3 sentences explaining in plain English what strategy you understood, why those markets were selected based on the data, and what trade-offs or signals drove the recommendation. Do NOT repeat the user prompt verbatim. Explain the logic as if briefing a marketing manager."
 }}
 """
 
