@@ -31,5 +31,5 @@ Thumbs.db
 .idea/
 
 # Large/local data
-results/
+# results/ — kept in repo so server has the data files
 
