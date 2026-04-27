@@ -2350,7 +2350,7 @@ SINGLE-SEGMENT format (default — use for most prompts):
   "steps": [],
   "execution_order": [],
   "assumptions": [],
-  "reasoning": "2-3 sentences in plain English explaining what strategy you understood, which market signals drove the market selection, and what the recommended action aims to achieve. Do NOT repeat the user prompt verbatim. Write as if briefing a marketing manager who did not see the original prompt."
+  "reasoning": ""
 }}
 
 MULTI-SEGMENT format (use when the prompt defines two or more distinct market groups, each with their own conditions):
@@ -2382,7 +2382,7 @@ EXAMPLE A — same action, different conditions per group (both segments use act
     {{"market": "MarketName", "action_direction": "increase", "reason": "explicit exception"}}
   ],
   "assumptions": [],
-  "reasoning": "2-3 sentences in plain English explaining what strategy you understood, which market signals drove the market selection, and what the recommended action aims to achieve. Do NOT repeat the user prompt verbatim. Write as if briefing a marketing manager who did not see the original prompt."
+  "reasoning": ""
 }}
 
 EXAMPLE B — different actions per group (top 5 increase, bottom 10 decrease):
@@ -2409,8 +2409,14 @@ EXAMPLE B — different actions per group (top 5 increase, bottom 10 decrease):
   ],
   "exceptions": [],
   "assumptions": [],
-  "reasoning": "2-3 sentences in plain English explaining what strategy you understood, which market signals drove the market selection, and what the recommended action aims to achieve. Do NOT repeat the user prompt verbatim. Write as if briefing a marketing manager who did not see the original prompt."
+  "reasoning": ""
 }}
+
+FIELD INSTRUCTIONS:
+- "goal": One sentence restating the business objective in your own words. Do NOT copy the user prompt.
+- "reasoning": Write 2-3 sentences in plain English explaining: (1) what strategy you identified, (2) which market signals (e.g. declining market share, brand salience below category) drove which markets being selected, and (3) what the recommended budget action aims to achieve. Do NOT repeat the user prompt verbatim. Write as if briefing a marketing manager who has not seen the original prompt.
+- "assumptions": List any assumptions you made that were not explicitly stated in the prompt.
+- "action_direction": Must be one of: increase, decrease, protect, hold, rebalance.
 
 Return ONLY valid JSON matching one of the two formats above.
 """
