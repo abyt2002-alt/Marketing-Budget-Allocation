@@ -850,6 +850,17 @@ type AppSnapshotPayload = {
   scenarioFlowSortKey: 'share' | 'spend'
 }
 
+// Brand display name mapping — frontend only, does not affect API calls
+const BRAND_DISPLAY_MAP: Record<string, string> = {
+  'Aer Matic': 'Lumière Noir',
+  'Aer O': 'Velvet Bloom',
+  'Aer PP': 'Cedar Mist',
+  'Aer Spray': 'Amber Dusk',
+  'Godrej Expert Rich Crème': 'Rosé Élite',
+  'Godrej Shampoo Hair Color': 'Oud Royale',
+}
+const displayBrand = (brand: string): string => BRAND_DISPLAY_MAP[brand] ?? brand
+
 const API_BASE_URL = (() => {
   const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim()
   if (envBase) {
@@ -1352,7 +1363,7 @@ function App() {
       const raw = step1AllocationDraft[row.brand] ?? ''
       const valueBn = Number(raw)
       if (!Number.isFinite(valueBn) || valueBn < 0) {
-        setStep1EditError(`Enter a valid allocated budget in Bn for ${row.brand}.`)
+        setStep1EditError(`Enter a valid allocated budget in Bn for ${displayBrand(row.brand)}.`)
         return
       }
       const nextAllocated = valueBn * 1_000_000_000
@@ -1361,7 +1372,7 @@ function App() {
       const maxAllowed = Number(row.max_allowed_budget ?? baselineBudget * 1.25)
       if (nextAllocated < minAllowed - 1 || nextAllocated > maxAllowed + 1) {
         setStep1EditError(
-          `${row.brand} must stay within ${formatCurrencyBn(minAllowed)} to ${formatCurrencyBn(maxAllowed)}.`,
+          `${displayBrand(row.brand)} must stay within ${formatCurrencyBn(minAllowed)} to ${formatCurrencyBn(maxAllowed)}.`,
         )
         return
       }
@@ -2747,7 +2758,7 @@ function App() {
                 >
                   {step2BrandOptions.map((brand) => (
                     <option key={brand} value={brand}>
-                      {brand}
+                      {displayBrand(brand)}
                     </option>
                   ))}
                 </select>
@@ -3999,7 +4010,7 @@ function App() {
               >
                 {step2BrandOptions.map((brand) => (
                   <option key={brand} value={brand}>
-                    {brand}
+                    {displayBrand(brand)}
                   </option>
                 ))}
               </select>
@@ -4229,7 +4240,7 @@ function App() {
                   >
                     {step2BrandOptions.map((brand) => (
                       <option key={`ai-mode-brand-${brand}`} value={brand}>
-                        {brand}
+                        {displayBrand(brand)}
                       </option>
                     ))}
                   </select>
@@ -4664,7 +4675,7 @@ function App() {
                 >
                   {step2BrandOptions.map((brand) => (
                     <option key={`driver-brand-${brand}`} value={brand}>
-                      {brand}
+                      {displayBrand(brand)}
                     </option>
                   ))}
                 </select>
@@ -5295,7 +5306,7 @@ function App() {
                                         : 0
                                     return (
                                       <tr key={row.brand} className={index % 2 === 0 ? 'bg-white' : 'bg-slate-50/50'}>
-                                        <td className="px-4 py-2.5 font-semibold text-dark-text">{row.brand}</td>
+                                        <td className="px-4 py-2.5 font-semibold text-dark-text">{displayBrand(row.brand)}</td>
                                         <td className="px-4 py-2.5 text-right text-slate-700">{formatCurrencyBn(row.baseline_budget)}</td>
                                         <td className="px-4 py-2.5 text-right text-slate-700">{formatPct(baselineSplit)}</td>
                                         <td className="px-4 py-2.5 text-right text-slate-700">
