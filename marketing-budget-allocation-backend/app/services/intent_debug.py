@@ -2343,14 +2343,14 @@ SINGLE VS MULTI-SEGMENT DECISION:
 
 SINGLE-SEGMENT format (default — use for most prompts):
 {{
-  "goal": "",
+  "goal": "one-line restatement of the business objective in your own words — do NOT copy the prompt",
   "task_types": ["recommend", "filter"],
   "entity": "market",
   "action_direction": "increase",
   "steps": [],
   "execution_order": [],
   "assumptions": [],
-  "reasoning": ""
+  "reasoning": "2-3 sentences in plain English explaining what strategy you understood, which market signals drove the market selection, and what the recommended action aims to achieve. Do NOT repeat the user prompt verbatim. Write as if briefing a marketing manager who did not see the original prompt."
 }}
 
 MULTI-SEGMENT format (use when the prompt defines two or more distinct market groups, each with their own conditions):
@@ -2382,7 +2382,7 @@ EXAMPLE A — same action, different conditions per group (both segments use act
     {{"market": "MarketName", "action_direction": "increase", "reason": "explicit exception"}}
   ],
   "assumptions": [],
-  "reasoning": ""
+  "reasoning": "2-3 sentences in plain English explaining what strategy you understood, which market signals drove the market selection, and what the recommended action aims to achieve. Do NOT repeat the user prompt verbatim. Write as if briefing a marketing manager who did not see the original prompt."
 }}
 
 EXAMPLE B — different actions per group (top 5 increase, bottom 10 decrease):
@@ -2409,7 +2409,7 @@ EXAMPLE B — different actions per group (top 5 increase, bottom 10 decrease):
   ],
   "exceptions": [],
   "assumptions": [],
-  "reasoning": ""
+  "reasoning": "2-3 sentences in plain English explaining what strategy you understood, which market signals drove the market selection, and what the recommended action aims to achieve. Do NOT repeat the user prompt verbatim. Write as if briefing a marketing manager who did not see the original prompt."
 }}
 
 Return ONLY valid JSON matching one of the two formats above.
