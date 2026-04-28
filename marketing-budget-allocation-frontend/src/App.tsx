@@ -5036,61 +5036,85 @@ function App() {
 
               {/* Row 2: TV vs Digital spend — before and after */}
               <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-blue-700">TV vs Digital Budget Split <span className="normal-case font-normal text-blue-400">(Spend in ₹M — separate from Reach shown in S-Curve)</span></p>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-blue-700">TV vs Digital Reach Split <span className="normal-case font-normal text-blue-400">(Annual reach — matches S-Curve axis)</span></p>
                 <div className="grid gap-3 sm:grid-cols-2">
                   {/* TV */}
-                  <div className="rounded-lg border border-blue-200 bg-white p-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">TV Spend (₹M)</p>
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${row.tv_spend_delta_mn >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
-                        {formatSignedCurrencyMn(row.tv_spend_delta_mn)}
-                      </span>
-                    </div>
-                    <div className="mt-2 flex items-end gap-2">
-                      <div className="flex-1 text-center">
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Before</p>
-                        <p className="text-base font-bold text-slate-700">{formatCurrencyMn(row.old_tv_spend_mn * 1_000_000)}</p>
-                        <p className="text-[10px] text-slate-500">{formatPct(row.old_tv_spend_share_pct, 1)} of market</p>
+                  {(() => {
+                    const oldTvReach = Number(row.fy25_tv_reach ?? 0)
+                    const newTvReach = Number(row.new_annual_tv_reach ?? 0)
+                    const tvReachDelta = newTvReach - oldTvReach
+                    const tvReachDeltaPct = oldTvReach > 0 ? (tvReachDelta / oldTvReach) * 100 : 0
+                    const minTvReach = Number(row.min_annual_tv_reach ?? 0)
+                    const maxTvReach = Number(row.max_annual_tv_reach ?? 0)
+                    const fmtR = (v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(1)}K` : v.toFixed(0)
+                    return (
+                      <div className="rounded-lg border border-blue-200 bg-white p-3">
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">TV Reach</p>
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${tvReachDelta >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                            {tvReachDelta >= 0 ? '+' : ''}{formatSignedPct(tvReachDeltaPct, 1)}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex items-end gap-2">
+                          <div className="flex-1 text-center">
+                            <p className="text-[10px] uppercase tracking-wide text-slate-400">Before</p>
+                            <p className="text-base font-bold text-slate-700">{fmtR(oldTvReach)}</p>
+                            <p className="text-[10px] text-slate-500">{formatPct(row.old_tv_split_pct, 1)} reach mix</p>
+                          </div>
+                          <p className="mb-1 text-slate-400">→</p>
+                          <div className="flex-1 text-center">
+                            <p className="text-[10px] uppercase tracking-wide text-slate-400">After</p>
+                            <p className={`text-base font-bold ${tvReachDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmtR(newTvReach)}</p>
+                            <p className="text-[10px] text-slate-500">{formatPct(row.new_tv_split_pct, 1)} reach mix</p>
+                          </div>
+                        </div>
+                        {(minTvReach > 0 || maxTvReach > 0) && (
+                          <div className="mt-2 text-[10px] text-slate-400">
+                            Feasible range: {fmtR(minTvReach)} – {fmtR(maxTvReach)}
+                          </div>
+                        )}
                       </div>
-                      <p className="mb-1 text-slate-400">→</p>
-                      <div className="flex-1 text-center">
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">After</p>
-                        <p className={`text-base font-bold ${deltaClass(row.tv_spend_delta_mn)}`}>{formatCurrencyMn(row.new_tv_spend_mn * 1_000_000)}</p>
-                        <p className="text-[10px] text-slate-500">{formatPct(row.new_tv_spend_share_pct, 1)} of market</p>
-                      </div>
-                    </div>
-                    <div className="mt-2 text-[10px] text-slate-500">
-                      Reach mix: {formatPct(row.old_tv_split_pct, 1)} → {formatPct(row.new_tv_split_pct, 1)}
-                      <span className={`ml-1 font-semibold ${deltaClass(row.tv_split_change_pct)}`}>({formatSignedPct(row.tv_split_change_pct, 1)})</span>
-                    </div>
-                  </div>
+                    )
+                  })()}
 
                   {/* Digital */}
-                  <div className="rounded-lg border border-purple-200 bg-white p-3">
-                    <div className="flex items-center justify-between">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-purple-600">Digital Spend (₹M)</p>
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${row.digital_spend_delta_mn >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
-                        {formatSignedCurrencyMn(row.digital_spend_delta_mn)}
-                      </span>
-                    </div>
-                    <div className="mt-2 flex items-end gap-2">
-                      <div className="flex-1 text-center">
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Before</p>
-                        <p className="text-base font-bold text-slate-700">{formatCurrencyMn(row.old_digital_spend_mn * 1_000_000)}</p>
-                        <p className="text-[10px] text-slate-500">{formatPct(100 - row.old_tv_spend_share_pct, 1)} of market</p>
+                  {(() => {
+                    const oldDgReach = Number(row.fy25_digital_reach ?? 0)
+                    const newDgReach = Number(row.new_annual_digital_reach ?? 0)
+                    const dgReachDelta = newDgReach - oldDgReach
+                    const dgReachDeltaPct = oldDgReach > 0 ? (dgReachDelta / oldDgReach) * 100 : 0
+                    const minDgReach = Number(row.min_annual_digital_reach ?? 0)
+                    const maxDgReach = Number(row.max_annual_digital_reach ?? 0)
+                    const fmtR = (v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(1)}K` : v.toFixed(0)
+                    return (
+                      <div className="rounded-lg border border-purple-200 bg-white p-3">
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-purple-600">Digital Reach</p>
+                          <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${dgReachDelta >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
+                            {dgReachDelta >= 0 ? '+' : ''}{formatSignedPct(dgReachDeltaPct, 1)}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex items-end gap-2">
+                          <div className="flex-1 text-center">
+                            <p className="text-[10px] uppercase tracking-wide text-slate-400">Before</p>
+                            <p className="text-base font-bold text-slate-700">{fmtR(oldDgReach)}</p>
+                            <p className="text-[10px] text-slate-500">{formatPct(row.old_digital_split_pct, 1)} reach mix</p>
+                          </div>
+                          <p className="mb-1 text-slate-400">→</p>
+                          <div className="flex-1 text-center">
+                            <p className="text-[10px] uppercase tracking-wide text-slate-400">After</p>
+                            <p className={`text-base font-bold ${dgReachDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>{fmtR(newDgReach)}</p>
+                            <p className="text-[10px] text-slate-500">{formatPct(row.new_digital_split_pct, 1)} reach mix</p>
+                          </div>
+                        </div>
+                        {(minDgReach > 0 || maxDgReach > 0) && (
+                          <div className="mt-2 text-[10px] text-slate-400">
+                            Feasible range: {fmtR(minDgReach)} – {fmtR(maxDgReach)}
+                          </div>
+                        )}
                       </div>
-                      <p className="mb-1 text-slate-400">→</p>
-                      <div className="flex-1 text-center">
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">After</p>
-                        <p className={`text-base font-bold ${deltaClass(row.digital_spend_delta_mn)}`}>{formatCurrencyMn(row.new_digital_spend_mn * 1_000_000)}</p>
-                        <p className="text-[10px] text-slate-500">{formatPct(100 - row.new_tv_spend_share_pct, 1)} of market</p>
-                      </div>
-                    </div>
-                    <div className="mt-2 text-[10px] text-slate-500">
-                      Reach mix: {formatPct(row.old_digital_split_pct, 1)} → {formatPct(row.new_digital_split_pct, 1)}
-                      <span className={`ml-1 font-semibold ${deltaClass(row.digital_split_change_pct)}`}>({formatSignedPct(row.digital_split_change_pct, 1)})</span>
-                    </div>
-                  </div>
+                    )
+                  })()}
                 </div>
               </div>
             </div>
