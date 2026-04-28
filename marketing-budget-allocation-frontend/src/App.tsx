@@ -392,6 +392,14 @@ type ScenarioMarketFlowRow = {
   digital_spend_delta_mn: number
   old_tv_spend_share_pct: number
   new_tv_spend_share_pct: number
+  old_tv_reach: number
+  new_tv_reach: number
+  old_digital_reach: number
+  new_digital_reach: number
+  min_tv_reach: number
+  max_tv_reach: number
+  min_digital_reach: number
+  max_digital_reach: number
 }
 
 type ScenarioResultsResponse = {
@@ -2518,6 +2526,14 @@ function App() {
         digital_spend_delta_mn: (newDigitalSpend - oldDigitalSpend) / 1_000_000,
         old_tv_spend_share_pct: oldTvSpendSharePct,
         new_tv_spend_share_pct: newTvSpendSharePct,
+        old_tv_reach: Number(row.fy25_tv_reach ?? 0),
+        new_tv_reach: Number(row.new_annual_tv_reach ?? 0),
+        old_digital_reach: Number(row.fy25_digital_reach ?? 0),
+        new_digital_reach: Number(row.new_annual_digital_reach ?? 0),
+        min_tv_reach: Number(row.min_annual_tv_reach ?? 0),
+        max_tv_reach: Number(row.max_annual_tv_reach ?? 0),
+        min_digital_reach: Number(row.min_annual_digital_reach ?? 0),
+        max_digital_reach: Number(row.max_annual_digital_reach ?? 0),
       }
     })
     const sorter: (a: ScenarioMarketFlowRow, b: ScenarioMarketFlowRow) => number =
@@ -5040,12 +5056,12 @@ function App() {
                 <div className="grid gap-3 sm:grid-cols-2">
                   {/* TV */}
                   {(() => {
-                    const oldTvReach = Number(row.fy25_tv_reach ?? 0)
-                    const newTvReach = Number(row.new_annual_tv_reach ?? 0)
+                    const oldTvReach = row.old_tv_reach
+                    const newTvReach = row.new_tv_reach
                     const tvReachDelta = newTvReach - oldTvReach
                     const tvReachDeltaPct = oldTvReach > 0 ? (tvReachDelta / oldTvReach) * 100 : 0
-                    const minTvReach = Number(row.min_annual_tv_reach ?? 0)
-                    const maxTvReach = Number(row.max_annual_tv_reach ?? 0)
+                    const minTvReach = row.min_tv_reach
+                    const maxTvReach = row.max_tv_reach
                     const fmtR = (v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(1)}K` : v.toFixed(0)
                     return (
                       <div className="rounded-lg border border-blue-200 bg-white p-3">
@@ -5079,12 +5095,12 @@ function App() {
 
                   {/* Digital */}
                   {(() => {
-                    const oldDgReach = Number(row.fy25_digital_reach ?? 0)
-                    const newDgReach = Number(row.new_annual_digital_reach ?? 0)
+                    const oldDgReach = row.old_digital_reach
+                    const newDgReach = row.new_digital_reach
                     const dgReachDelta = newDgReach - oldDgReach
                     const dgReachDeltaPct = oldDgReach > 0 ? (dgReachDelta / oldDgReach) * 100 : 0
-                    const minDgReach = Number(row.min_annual_digital_reach ?? 0)
-                    const maxDgReach = Number(row.max_annual_digital_reach ?? 0)
+                    const minDgReach = row.min_digital_reach
+                    const maxDgReach = row.max_digital_reach
                     const fmtR = (v: number) => v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M` : v >= 1_000 ? `${(v / 1_000).toFixed(1)}K` : v.toFixed(0)
                     return (
                       <div className="rounded-lg border border-purple-200 bg-white p-3">
