@@ -850,7 +850,7 @@ type AppSnapshotPayload = {
   scenarioFlowSortKey: 'share' | 'spend'
 }
 
-import { displayBrand } from './utils/brandDisplay'
+import { displayBrand, maskBrandInLabel } from './utils/brandDisplay'
 
 const API_BASE_URL = (() => {
   const envBase = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim()
@@ -3737,8 +3737,8 @@ function App() {
       if (points.length === 0 || !wf || wf.items.length === 0) {
         return (
           <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-            <p className="text-sm font-semibold text-dark-text">YoY Bridge</p>
-            <p className="mt-2 text-xs text-slate-500">No YoY data available.</p>
+            <p className="text-sm font-semibold text-dark-text">Growth Decomposition</p>
+            <p className="mt-2 text-xs text-slate-500">No growth data available.</p>
           </div>
         )
       }
@@ -3747,16 +3747,30 @@ function App() {
       if (!fromPoint || !toPoint) {
         return (
           <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-            <p className="text-sm font-semibold text-dark-text">YoY Bridge</p>
-            <p className="mt-2 text-xs text-slate-500">Unable to render YoY bridge for this selection.</p>
+            <p className="text-sm font-semibold text-dark-text">Growth Decomposition</p>
+            <p className="mt-2 text-xs text-slate-500">Unable to render decomposition for this selection.</p>
           </div>
         )
       }
 
-      const drivers = (wf.items ?? []).slice(0, 8).map((item) => ({
+      // Backend already groups beyond top-8 into "Other Drivers" — show all items
+      const drivers = (wf.items ?? []).map((item) => ({
         ...item,
-        label: item.label.replace(/AllMedia Reach/gi, 'Halo Media Reach').replace(/\s+/g, ' ').trim(),
+        label: maskBrandInLabel(
+          item.label.replace(/AllMedia Reach/gi, 'Halo Media Reach').replace(/\s+/g, ' ').trim()
+        ),
       }))
+      // Add unexplained residual (base/intercept/seasonality) if shares don't sum to 100
+      const totalShare = drivers.reduce((s, d) => s + Number(d.share_of_total_change_pct), 0)
+      const residualShare = 100 - totalShare
+      if (Math.abs(residualShare) > 0.5) {
+        const residualDelta = (wf.total_change_mn ?? 0) * (residualShare / 100)
+        drivers.push({
+          label: 'Base / Seasonality',
+          delta_mn: residualDelta,
+          share_of_total_change_pct: residualShare,
+        } as typeof drivers[0])
+      }
       type BridgeStep = {
         key: string
         label: string
@@ -3798,54 +3812,75 @@ function App() {
         delta: toPoint.volume_mn,
       })
 
-      const minY = Math.min(0, ...steps.map((s) => Math.min(s.from, s.to)))
-      const maxY = Math.max(...steps.map((s) => Math.max(s.from, s.to)))
-      const yPad = Math.max(0.01, (maxY - minY) * 0.16)
-      const yLow = minY - yPad
+      const startVol = fromPoint.volume_mn
+      const endVol = toPoint.volume_mn
+      const driverValues = steps.filter(s => s.type === 'driver').flatMap(s => [s.from, s.to])
+      const allValues = [startVol, endVol, ...driverValues]
+      const minY = Math.min(...allValues)
+      const maxY = Math.max(...allValues)
+      // Zoom in: cut bottom at 80% of start volume so driver bars are visible
+      const zoomedMin = Math.min(minY, startVol * 0.92)
+      const yPad = Math.max(0.01, (maxY - zoomedMin) * 0.08)
+      const yLow = zoomedMin - yPad
       const yHigh = maxY + yPad
-      const chartHeight = 410
-      const top = 22
-      const bottom = 118
-      const left = 56
-      const right = 28
+      const chartHeight = 380
+      const top = 28
+      const bottom = 55
+      const left = 60
+      const right = 16
       const plotHeight = chartHeight - top - bottom
-      const chartWidth = Math.max(1280, left + right + steps.length * 120)
+      const chartWidth = 1100
       const slotWidth = (chartWidth - left - right) / Math.max(1, steps.length)
-      const barWidth = Math.min(72, Math.max(44, slotWidth * 0.58))
+      const barWidth = Math.min(80, Math.max(40, slotWidth * 0.65))
       const mapY = (value: number) => top + ((yHigh - value) / Math.max(1e-9, yHigh - yLow)) * plotHeight
       const xFor = (idx: number) => left + idx * slotWidth + (slotWidth - barWidth) / 2
       const ticks = [0, 1, 2, 3]
 
       return (
         <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+          {/* Header */}
           <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-            <p className="text-sm font-semibold text-dark-text">YoY Bridge</p>
-            <span className="text-xs text-slate-500">Start + driver impacts + end value. Share % is shown below each driver.</span>
+            <div>
+              <p className="text-sm font-semibold text-dark-text">Growth Decomposition</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">{wf.from_fiscal_year} → {wf.to_fiscal_year} · What drove the volume change?</p>
+            </div>
+            {/* Legend */}
+            <div className="flex items-center gap-3 text-[10px] text-slate-500">
+              <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 rounded-sm bg-blue-600 opacity-80"/><span>Total Volume</span></span>
+              <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 rounded-sm bg-green-600 opacity-90"/><span>Positive Driver</span></span>
+              <span className="flex items-center gap-1"><span className="inline-block w-3 h-3 rounded-sm bg-orange-500 opacity-90"/><span>Negative Driver</span></span>
+              <span className="flex items-center gap-1.5 bg-slate-100 rounded px-2 py-0.5 font-medium">% = share of total volume change</span>
+            </div>
           </div>
+
+          {/* KPI row */}
           <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Start ({wf.from_fiscal_year})</p>
+            <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-500">Base Volume ({wf.from_fiscal_year})</p>
               <p className="mt-1 text-sm font-semibold text-dark-text">{(fromPoint.volume_mn * 10).toFixed(2)} Lakh</p>
             </div>
-            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">End ({wf.to_fiscal_year})</p>
+            <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-500">Final Volume ({wf.to_fiscal_year})</p>
               <p className="mt-1 text-sm font-semibold text-dark-text">{(toPoint.volume_mn * 10).toFixed(2)} Lakh</p>
             </div>
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Net Change</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Volume Change</p>
               <p className={`mt-1 text-sm font-semibold ${wf.total_change_mn >= 0 ? 'text-success' : 'text-danger'}`}>
                 {formatSignedNumber((wf.total_change_mn ?? 0) * 10, 2)} Lakh
               </p>
+              <p className="text-[10px] text-slate-400 mt-0.5">absolute change in units</p>
             </div>
             <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">YoY Growth</p>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Volume Growth</p>
               <p className={`mt-1 text-sm font-semibold ${(toPoint.yoy_growth_pct ?? 0) >= 0 ? 'text-success' : 'text-danger'}`}>
                 {formatSignedPct(toPoint.yoy_growth_pct, 2)}
               </p>
+              <p className="text-[10px] text-slate-400 mt-0.5">vs previous year</p>
             </div>
           </div>
-          <div className="mt-3 overflow-x-auto rounded-lg border border-slate-200 bg-slate-50/70 p-2">
-            <svg width={chartWidth} height={chartHeight} role="img" aria-label="YoY bridge chart">
+          {/* Waterfall chart — responsive, no scroll */}
+          <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50/70 p-2">
+            <svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} width="100%" height={chartHeight} role="img" aria-label="Growth decomposition chart" preserveAspectRatio="xMidYMid meet">
               {ticks.map((i) => {
                 const v = yLow + ((yHigh - yLow) * i) / (ticks.length - 1)
                 const y = mapY(v)
@@ -3858,7 +3893,6 @@ function App() {
                   </g>
                 )
               })}
-
               {steps.map((step, idx) => {
                 const x = xFor(idx)
                 const y0 = mapY(step.from)
@@ -3868,47 +3902,71 @@ function App() {
                 const isPositive = step.delta >= 0
                 const isTotal = step.type === 'start' || step.type === 'end'
                 const color = isTotal ? '#2563EB' : isPositive ? '#16A34A' : '#F97316'
-                const valueLabel =
-                  step.type === 'driver' ? `${step.delta >= 0 ? '+' : ''}${(step.delta * 10).toFixed(2)} Lakh` : `${(step.to * 10).toFixed(2)} Lakh`
-                const shortLabel = step.label.length > 15 ? `${step.label.slice(0, 15)}...` : step.label
-                const pctLabel = step.type === 'driver' && Number.isFinite(step.sharePct)
-                  ? `${(step.sharePct ?? 0) >= 0 ? '+' : ''}${(step.sharePct ?? 0).toFixed(1)}%`
-                  : ''
+                const valueLabel = step.type === 'driver'
+                  ? `${step.delta >= 0 ? '+' : ''}${(step.delta * 10).toFixed(2)}L`
+                  : `${(step.to * 10).toFixed(2)} Lakh`
+                const shortLabel = step.label.length > 10 ? `${step.label.slice(0, 10)}…` : step.label
                 return (
                   <g key={step.key}>
                     <rect x={x} y={yTop} width={barWidth} height={height} rx={4} fill={color} opacity={isTotal ? 0.85 : 0.92} />
-                    <text x={x + barWidth / 2} y={yTop - 6} textAnchor="middle" fontSize="10" fontWeight="600" fill="#0F172A">
-                      {valueLabel}
-                    </text>
-                    <text x={x + barWidth / 2} y={chartHeight - 38} textAnchor="middle" fontSize="10" fill="#334155">
-                      {shortLabel}
-                    </text>
-                    {pctLabel ? (
-                      <text x={x + barWidth / 2} y={chartHeight - 20} textAnchor="middle" fontSize="10" fontWeight="600" fill={isPositive ? '#16A34A' : '#F97316'}>
-                        {pctLabel}
-                      </text>
-                    ) : null}
+                    <text x={x + barWidth / 2} y={yTop - 5} textAnchor="middle" fontSize="10" fontWeight="600" fill="#0F172A">{valueLabel}</text>
+                    <text x={x + barWidth / 2} y={chartHeight - 10} textAnchor="middle" fontSize="10" fill="#334155">{shortLabel}</text>
                     {idx < steps.length - 1 ? (
-                      <line
-                        x1={x + barWidth}
-                        y1={mapY(step.to)}
-                        x2={xFor(idx + 1)}
-                        y2={mapY(step.to)}
-                        stroke="#94A3B8"
-                        strokeDasharray="4 3"
-                      />
+                      <line x1={x + barWidth} y1={mapY(step.to)} x2={xFor(idx + 1)} y2={mapY(step.to)} stroke="#94A3B8" strokeDasharray="4 3" />
                     ) : null}
                   </g>
                 )
               })}
-
-              <text transform={`translate(14 ${chartHeight / 2}) rotate(-90)`} textAnchor="middle" fontSize="11" fontWeight="700" fill="#334155">
-                Volume (Lakh)
-              </text>
-              <text x={chartWidth / 2} y={chartHeight - 4} textAnchor="middle" fontSize="11" fontWeight="700" fill="#334155">
-                Drivers And Share Of Net Change (%)
-              </text>
+              <text transform={`translate(14 ${chartHeight / 2}) rotate(-90)`} textAnchor="middle" fontSize="11" fontWeight="700" fill="#334155">Volume (Lakh)</text>
             </svg>
+          </div>
+
+          {/* Driver breakdown — horizontal bars */}
+          <div className="mt-4">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400 mb-2">
+              What drove the change? — each bar shows that driver's share of total volume change
+            </p>
+            <div className="space-y-2">
+              {drivers.map((d) => {
+                const pct = Number(d.share_of_total_change_pct)
+                const isPos = d.delta_mn >= 0
+                const barPct = Math.min(100, Math.abs(pct))
+                return (
+                  <div key={d.label} className="flex items-center gap-3">
+                    {/* Driver name */}
+                    <div className="w-44 flex-shrink-0 text-right">
+                      <span className="text-xs text-slate-600 font-medium">{d.label}</span>
+                    </div>
+                    {/* Bar */}
+                    <div className="flex-1 flex items-center gap-2">
+                      <div className="flex-1 bg-slate-100 rounded-full h-4 overflow-hidden">
+                        <div
+                          className="h-4 rounded-full transition-all"
+                          style={{
+                            width: `${barPct}%`,
+                            background: isPos ? '#16A34A' : '#F97316',
+                            opacity: 0.85,
+                          }}
+                        />
+                      </div>
+                    </div>
+                    {/* Values */}
+                    <div className="w-28 flex-shrink-0 flex items-center gap-2">
+                      <span className={`text-xs font-bold w-16 text-right ${isPos ? 'text-green-600' : 'text-orange-500'}`}>
+                        {isPos ? '+' : ''}{pct.toFixed(1)}% of Δ
+                      </span>
+                      <span className="text-[10px] text-slate-400">
+                        {isPos ? '+' : ''}{(d.delta_mn * 10).toFixed(2)}L
+                      </span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+            <p className="mt-3 text-[10px] text-slate-400">
+              % of Δ = that driver's contribution as a share of the total volume change ({formatSignedNumber((wf.total_change_mn ?? 0) * 10, 2)} Lakh).
+              Positive drivers (green) added volume; negative drivers (orange) reduced it.
+            </p>
           </div>
         </div>
       )
@@ -3920,7 +3978,7 @@ function App() {
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-primary">Insights</p>
             <h2 className="mt-1 text-lg font-semibold text-dark-text">S Curves & Contribution Drivers</h2>
-            <p className="mt-1 text-sm text-slate-500">Navigate markets and review response curves, contribution drivers, and YoY growth for the selected state.</p>
+            <p className="mt-1 text-sm text-slate-500">Navigate markets and review response curves, contribution drivers, and growth decomposition for the selected state.</p>
             <p className="mt-1 text-xs font-semibold uppercase tracking-wide text-slate-500">All chart values are shown in lakhs</p>
           </div>
           <div className="flex items-center gap-2">
@@ -4032,7 +4090,7 @@ function App() {
                   activeInsightsSection === 'yoy' ? 'bg-primary text-white' : 'text-slate-700'
                 }`}
               >
-                YoY Growth
+                Growth Decomposition
               </button>
             </div>
 
@@ -4071,7 +4129,7 @@ function App() {
             ) : null}
 
             {activeInsightsSection === 'yoy' && yoyLoading && !yoyData ? (
-              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">Loading YoY growth...</div>
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">Loading Growth Decomposition...</div>
             ) : null}
 
             {activeInsightsSection === 'yoy' && !yoyLoading && yoyData ? renderYoyGrowthCard() : null}
@@ -4978,12 +5036,12 @@ function App() {
 
               {/* Row 2: TV vs Digital spend — before and after */}
               <div className="rounded-xl border border-blue-100 bg-blue-50/40 p-3">
-                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-blue-700">TV vs Digital Budget Split</p>
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-blue-700">TV vs Digital Budget Split <span className="normal-case font-normal text-blue-400">(Spend in ₹M — separate from Reach shown in S-Curve)</span></p>
                 <div className="grid gap-3 sm:grid-cols-2">
                   {/* TV */}
                   <div className="rounded-lg border border-blue-200 bg-white p-3">
                     <div className="flex items-center justify-between">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">TV</p>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-blue-600">TV Spend (₹M)</p>
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${row.tv_spend_delta_mn >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
                         {formatSignedCurrencyMn(row.tv_spend_delta_mn)}
                       </span>
@@ -5010,7 +5068,7 @@ function App() {
                   {/* Digital */}
                   <div className="rounded-lg border border-purple-200 bg-white p-3">
                     <div className="flex items-center justify-between">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-purple-600">Digital</p>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-purple-600">Digital Spend (₹M)</p>
                       <span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${row.digital_spend_delta_mn >= 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
                         {formatSignedCurrencyMn(row.digital_spend_delta_mn)}
                       </span>
