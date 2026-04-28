@@ -400,6 +400,8 @@ type ScenarioMarketFlowRow = {
   max_tv_reach: number
   min_digital_reach: number
   max_digital_reach: number
+  tv_delta_reach_pct: number
+  digital_delta_reach_pct: number
 }
 
 type ScenarioResultsResponse = {
@@ -2534,6 +2536,8 @@ function App() {
         max_tv_reach: Number(row.max_annual_tv_reach ?? 0),
         min_digital_reach: Number(row.min_annual_digital_reach ?? 0),
         max_digital_reach: Number(row.max_annual_digital_reach ?? 0),
+        tv_delta_reach_pct: Number(row.tv_delta_reach_pct ?? 0),
+        digital_delta_reach_pct: Number(row.digital_delta_reach_pct ?? 0),
       }
     })
     const sorter: (a: ScenarioMarketFlowRow, b: ScenarioMarketFlowRow) => number =
