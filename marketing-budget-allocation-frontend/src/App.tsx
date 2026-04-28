@@ -3713,7 +3713,7 @@ function App() {
                 return (
                   <div key={`${mode}-${item.variable}`} className="space-y-1">
                     <div className="flex items-center justify-between gap-2">
-                      <p className="truncate text-xs font-medium text-slate-700">{item.label}</p>
+                      <p className="truncate text-xs font-medium text-slate-700">{maskBrandInLabel(item.label)}</p>
                       <p className={`text-xs font-semibold ${isPositive ? 'text-primary' : 'text-danger'}`}>
                         {mode === 'absolute' ? `${formatMn(value / 1_000_000)} Lakh` : formatSignedPct(value, 2)}
                       </p>
@@ -4404,7 +4404,7 @@ function App() {
                         <div className="mt-1 space-y-1">
                           {(aiModeData.signal_snapshot?.contribution_top ?? []).slice(0, 3).map((item, idx) => (
                             <p key={`signal-driver-${idx}`} className="text-xs text-slate-700">
-                              {item.variable}: {formatSignedPct(item.share_pct, 1)}
+                              {maskBrandInLabel(item.variable)}: {formatSignedPct(item.share_pct, 1)}
                             </p>
                           ))}
                           {(aiModeData.signal_snapshot?.contribution_top ?? []).length === 0 ? (
@@ -4872,7 +4872,7 @@ function App() {
                                 <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${groupClass}`}>
                                   {driver.driver_group || 'External'}
                                 </span>
-                                <p className="truncate text-sm font-semibold text-dark-text">{driver.label}</p>
+                                <p className="truncate text-sm font-semibold text-dark-text">{maskBrandInLabel(driver.label)}</p>
                               </div>
                               <p className={`text-xs font-semibold ${toneClass}`}>
                                 {formatSignedNumber(delta, 3)} Mn ({formatSignedPct(driver.share_of_change_pct, 1)})
@@ -4930,7 +4930,7 @@ function App() {
                                 : 'bg-slate-100 text-slate-600'
                           return (
                             <tr key={`driver-row-${driver.variable}`} className="hover:bg-slate-50">
-                              <td className="px-3 py-2 text-sm font-semibold text-dark-text">{driver.label}</td>
+                              <td className="px-3 py-2 text-sm font-semibold text-dark-text">{maskBrandInLabel(driver.label)}</td>
                               <td className="px-3 py-2">
                                 <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${typeClass}`}>
                                   {driver.driver_group || 'External'}
