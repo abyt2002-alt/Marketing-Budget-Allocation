@@ -1244,64 +1244,25 @@ def _normalize_interpretation(prompt: str, raw_parsed_json: dict[str, Any] | Non
         task_types = ["recommend", "filter"]
         notes.append("Task types defaulted to `recommend` + `filter`.")
 
-    raw_filters = parsed.get("filters")
-    if not isinstance(raw_filters, list):
-        raw_filters = parsed.get("conditions") if isinstance(parsed.get("conditions"), list) else []
-    filters = [item for item in (_normalize_filter_item(entry, prompt) for entry in raw_filters if isinstance(entry, dict)) if item is not None]
-    if not filters:
-        inferred = _infer_filters_from_prompt(prompt)
-        if inferred:
-            filters = inferred
-            notes.append("Filter rules were inferred from prompt semantics.")
-
-    raw_comparisons = parsed.get("comparisons")
-    if not isinstance(raw_comparisons, list):
-        raw_comparisons = [parsed.get("comparison")] if isinstance(parsed.get("comparison"), dict) else []
-    comparisons = [item for item in (_normalize_comparison_item(entry, prompt) for entry in raw_comparisons if isinstance(entry, dict)) if item is not None]
-    if not comparisons:
-        inferred = _infer_comparisons_from_prompt(prompt)
-        if inferred:
-            comparisons = inferred
-            notes.append("Comparison rules were inferred from prompt semantics.")
-
-    raw_rankings = parsed.get("rankings")
-    if not isinstance(raw_rankings, list):
-        raw_rankings = [parsed.get("ranking")] if isinstance(parsed.get("ranking"), dict) else []
-    rankings = [item for item in (_normalize_ranking_item(entry, prompt) for entry in raw_rankings if isinstance(entry, dict)) if item is not None]
-    if not rankings:
-        inferred = _infer_rankings_from_prompt(prompt)
-        if inferred:
-            rankings = inferred
-            notes.append("Ranking rules were inferred from prompt semantics.")
-
     available_markets = [row["market"] for row in rows]
-    raw_exclusions = parsed.get("exclusions")
-    if not isinstance(raw_exclusions, list):
-        raw_exclusions = []
-    exclusions = [
-        item
-        for item in (_normalize_exclusion_item(entry, available_markets, prompt) for entry in raw_exclusions if isinstance(entry, dict))
-        if item is not None
-    ]
-    if not exclusions:
-        inferred = _infer_exclusions_from_prompt(prompt, available_markets)
-        if inferred:
-            exclusions = inferred
-            notes.append("Exclusion rules were inferred from prompt semantics.")
 
     raw_steps = parsed.get("steps")
     step_plan: list[dict[str, Any]] = []
     execution_order: list[str] = []
+    dropped_count = 0
     if isinstance(raw_steps, list):
-        normalized_steps = [
-            item
-            for idx, entry in enumerate(raw_steps, start=1)
-            for item in [_normalize_step_item(entry, available_markets, prompt, idx)]
-            if item is not None
-        ]
+        normalized_steps = []
+        for idx, entry in enumerate(raw_steps, start=1):
+            if not isinstance(entry, dict):
+                continue
+            item = _normalize_step_item(entry, available_markets, prompt, idx)
+            if item is not None:
+                normalized_steps.append(item)
+            else:
+                dropped_count += 1
+                notes.append(f"Step {idx} (type={entry.get('step_type','?')}, metric={entry.get('metric_key','?')}) could not be normalized and was dropped.")
         if normalized_steps:
             step_plan = normalized_steps
-            execution_order = []
             if isinstance(parsed.get("execution_order"), list):
                 valid_ids = {str(step.get("id")) for step in step_plan}
                 for item in parsed.get("execution_order", []):
@@ -1312,40 +1273,12 @@ def _normalize_interpretation(prompt: str, raw_parsed_json: dict[str, Any] | Non
                 step_id = str(step.get("id"))
                 if step_id not in execution_order:
                     execution_order.append(step_id)
+            if dropped_count:
+                notes.append(f"{dropped_count} of {len(raw_steps)} steps were dropped during normalization — review may be needed.")
         else:
-            notes.append("Provided `steps` could not be normalized; falling back to inferred grouped plan.")
+            notes.append("All provided steps failed normalization; no plan could be built. Please revise the prompt or check metric names.")
     if not step_plan:
-        # Trinity returned no steps — fully infer from prompt semantics
-        legacy_execution_order = _normalize_execution_order(parsed.get("execution_order"), filters, comparisons, rankings, exclusions)
-        step_plan, execution_order = _steps_from_legacy_groups(filters, comparisons, rankings, exclusions, legacy_execution_order)
-    # When Trinity returned steps, trust them entirely — no supplemental injection.
-    # Human review catches any missed rules; adding inferred steps here causes hallucination.
-
-    # If the step plan has no exclude_ranking but the prompt implies one, inject it
-    has_exclude_ranking = any(str(s.get("step_type")) == "exclude_ranking" for s in step_plan)
-    if not has_exclude_ranking:
-        inferred_er = _infer_exclude_ranking_from_prompt(prompt)
-        if inferred_er:
-            next_idx = len(step_plan) + 1
-            for item in inferred_er:
-                step_id = f"step_{next_idx}"
-                next_idx += 1
-                step_plan.append({"id": step_id, "step_type": "exclude_ranking", "enabled": True, **item})
-                execution_order.append(step_id)
-            notes.append("Exclude-ranking rule inferred from prompt semantics.")
-
-    # If the step plan has no exclude_filter but the prompt implies one, inject it
-    has_exclude_filter = any(str(s.get("step_type")) == "exclude_filter" for s in step_plan)
-    if not has_exclude_filter:
-        inferred_ef = _infer_exclude_filter_from_prompt(prompt)
-        if inferred_ef:
-            next_idx = len(step_plan) + 1
-            for item in inferred_ef:
-                step_id = f"step_{next_idx}"
-                next_idx += 1
-                step_plan.append({"id": step_id, "step_type": "exclude_filter", "enabled": True, **item})
-                execution_order.append(step_id)
-            notes.append("Exclude-filter rule inferred from prompt semantics.")
+        notes.append("Gemini returned no parseable steps. The prompt may need clarification.")
 
     step_plan, execution_order, matched_markets = _execute_plan_steps(rows, step_plan, execution_order)
     market_dispositions, scoring_tiers = _compute_market_dispositions(rows, step_plan, action)
@@ -2408,6 +2341,25 @@ SINGLE-SEGMENT format (default — use for most prompts):
   "reasoning": ""
 }}
 
+SINGLE-SEGMENT EXAMPLE — prompt with multiple AND-chained conditions (ALL conditions must appear as separate steps):
+Prompt: "Increase spend in markets that are losing market share AND where brand salience is at or below category salience, but exclude the top 3 markets by category size."
+{{
+  "goal": "Prioritise markets with declining share and under-indexed brand salience, excluding the largest markets",
+  "task_types": ["recommend", "filter"],
+  "entity": "market",
+  "action_direction": "increase",
+  "steps": [
+    {{"id":"step_1","step_type":"filter","enabled":true,"metric_key":"change_in_market_share","metric_label":"Change In Market Share","kind":"trend","operator":"<","value":0,"source_text":"losing market share"}},
+    {{"id":"step_2","step_type":"comparison","enabled":true,"left_metric_key":"brand_salience","left_metric_label":"Brand Salience","operator":"<=","right_metric_key":"category_salience","right_metric_label":"Category Salience","source_text":"brand salience at or below category salience"}},
+    {{"id":"step_3","step_type":"exclude_ranking","enabled":true,"metric_key":"category_salience","metric_label":"Category Salience","direction":"descending","limit":3,"source_text":"exclude the top 3 markets by category size"}}
+  ],
+  "execution_order": ["step_1","step_2","step_3"],
+  "assumptions": [],
+  "reasoning": "Markets losing share that also under-index on brand salience need defensive investment. Excluding the top 3 by category size focuses spend on smaller markets where brand has room to grow."
+}}
+
+CRITICAL: Every distinct condition in the prompt MUST produce its own step. A prompt with 3 conditions → 3 steps. Never collapse multiple conditions into fewer steps. Each "AND", "but", "except", or qualifying clause is a separate step.
+
 MULTI-SEGMENT format (use when the prompt defines two or more distinct market groups, each with their own conditions):
 EXAMPLE A — same action, different conditions per group (both segments use action_direction "increase"):
 {{
@@ -2505,15 +2457,15 @@ def _call_gemini_intent_debug(
         "contents": [{"parts": [{"text": ai_prompt}]}],
         "generationConfig": {
             "temperature": 0.1,
-            "maxOutputTokens": 4096,
+            "maxOutputTokens": 8192,
             "responseMimeType": "application/json",
-            "thinkingConfig": {"thinkingBudget": 0},
+            "thinkingConfig": {"thinkingBudget": 8000},
         },
     }
     for attempt in range(2):
         try:
             req = urlrequest.Request(url, data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"})
-            with urlrequest.urlopen(req, timeout=20) as response:
+            with urlrequest.urlopen(req, timeout=45) as response:
                 parsed = json.loads(response.read().decode("utf-8"))
             print("GEMINI_RAW_RESPONSE:", json.dumps(parsed)[:4000], flush=True)
             candidates = parsed.get("candidates", [])
