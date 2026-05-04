@@ -1128,34 +1128,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     }
   }
 
-  async function _handleApprove() {
-    if (!interp || !brand) return
-    setHitlMode('approved')
-    setQaFeedbackText('')
-    setApprovalLoading(true)
-    setApprovalEvaluation(null)
-    setApprovalError('')
-    setScenarioHandoff(null)
-    setScenarioHandoffError('')
-    try {
-      const res = await axios.post<ApprovedPlanEvaluationResponse>(`${apiBaseUrl}/api/scenarios/intent/evaluate-approved`, {
-        selected_brand: brand,
-        selected_markets: markets,
-        budget_increase_type: 'percentage',
-        budget_increase_value: budgetIncreasePct,
-        market_overrides: {},
-        intent_prompt: prompt,
-        approved_interpretation: interp,
-      })
-      setApprovalEvaluation(res.data)
-      await prepareScenarioHandoff(interp)
-    } catch (err) {
-      setApprovalEvaluation(null)
-      setApprovalError(axios.isAxiosError(err) ? (err.response?.data?.detail ?? 'Failed to evaluate the approved plan.') : 'Unexpected error.')
-    } finally {
-      setApprovalLoading(false)
-    }
-  }
 
   const interp = result?.normalized_interpretation ?? null
   const hitl = result?.hitl ?? null
@@ -1181,9 +1153,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const zoomGenerationActive = zoomStatus === 'queued' || zoomStatus === 'running'
 
   const confidencePct = hitl ? Math.round(hitl.confidence * 100) : null
-  const _confColor = confidencePct == null ? '' : confidencePct >= 85 ? 'text-emerald-600' : confidencePct >= 65 ? 'text-amber-600' : 'text-red-500'
   const approvalHeadline = approvalEvaluation?.ai_review.headline || approvalEvaluation?.deterministic_overview.headline || ''
-  const _approvalSummary = approvalEvaluation?.ai_review.summary || approvalEvaluation?.deterministic_overview.summary || ''
   const supportedReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'supported') ?? []
   const mixedReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'mixed') ?? []
   const atRiskReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'at_risk') ?? []
