@@ -6221,7 +6221,13 @@ def _extract_prompt_market_actions(
 ) -> dict[str, Any]:
     actions: dict[str, ScenarioMarketAction] = {}
     notes: list[str] = []
-    clauses = [c.strip() for c in re.split(r"[.;\n]+", str(prompt or "")) if c.strip()]
+    # Split on sentence boundaries AND on "and/but" followed by an action verb
+    # so "increase where X and decrease where Y" becomes two clauses
+    _ACTION_SPLIT = re.compile(
+        r'[.;\n]+|(?<=\s)(?:and|but)\s+(?=(?:increase|decrease|reduce|boost|protect|hold|deprioritize|cut|grow|scale)\b)',
+        re.IGNORECASE,
+    )
+    clauses = [c.strip() for c in _ACTION_SPLIT.split(str(prompt or "")) if c.strip()]
     market_key_map = {_normalize_name_key(m): str(m).strip() for m in selected_markets if str(m).strip()}
     interpreted_conditions: list[dict[str, Any]] = []
     condition_seen: set[tuple[str, str]] = set()
