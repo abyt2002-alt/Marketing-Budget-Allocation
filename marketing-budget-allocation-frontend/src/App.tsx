@@ -1004,8 +1004,12 @@ function App() {
   }
 
   const step2BrandOptions = useMemo(() => {
-    const step1Brands = brandAllocation?.allocation_rows.map((row) => row.brand).filter((brand) => Boolean(brand)) ?? []
-    return step1Brands.length > 0 ? step1Brands : (config?.brands ?? [])
+    const configBrands = config?.brands ?? []
+    const allowed = new Set(configBrands)
+    const step1Brands = brandAllocation?.allocation_rows
+      .map((row) => row.brand)
+      .filter((brand) => Boolean(brand) && allowed.has(brand)) ?? []
+    return step1Brands.length > 0 ? step1Brands : configBrands
   }, [brandAllocation, config])
   const brandLookup = useMemo(() => {
     const lookup: Record<string, string> = {}
