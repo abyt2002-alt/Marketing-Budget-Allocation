@@ -3563,6 +3563,66 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       })}
                     </div>
 
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <span className="rounded-full bg-[#7b5c33] px-2.5 py-1 text-[11px] font-semibold text-white">Anchor scenario</span>
+                        <span className="text-xs text-slate-500">The selected 5,000-scenario plan is pinned here for comparison.</span>
+                      </div>
+                      <div className="grid gap-4 lg:grid-cols-5">
+                        {(() => {
+                          const item = zoomAnchor
+                          const zBudgetPct = scenarioBudgetUtilizedPct(item)
+                          const zVolH = Math.max(0, Math.min(100, Math.abs(item.volume_uplift_pct) * 6.5))
+                          const zRevH = Math.max(0, Math.min(100, Math.abs(item.revenue_uplift_pct) * 6.5))
+                          const zBudH = Math.max(0, Math.min(100, ((zBudgetPct - 80) / 40) * 100))
+                          const zVol = item.volume_uplift_pct >= 0 ? 'bg-emerald-500' : 'bg-rose-400'
+                          const zRev = item.revenue_uplift_pct >= 0 ? 'bg-blue-500' : 'bg-rose-400'
+                          const zBud = zBudgetPct > 100 ? 'bg-rose-400' : zBudgetPct > 90 ? 'bg-amber-400' : 'bg-slate-400'
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => { setScenarioModal(item); setScenarioModalSplitView('reach'); setScenarioModalSortBy('budget_delta'); setScenarioModalChangeFilter('all'); setScenarioPlanMessage('') }}
+                              className="rounded-2xl border-2 border-[#9c7a4a] bg-[#fcfaf7] px-4 py-4 text-left shadow-sm transition hover:shadow-md"
+                            >
+                              <div className="mb-4 flex items-center justify-between gap-2">
+                                <p className="text-sm font-semibold text-slate-900">{scenarioDisplayName(item)}</p>
+                                <span className="rounded-full bg-[#f5ede0] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[#7b5c33]">Selected</span>
+                              </div>
+                              <div className="relative grid h-44 grid-cols-3 gap-4">
+                                <div className="pointer-events-none absolute inset-x-0 bottom-9 border-t border-slate-200" />
+                                <div className="flex flex-col items-center">
+                                  <div className="relative h-32 w-full">
+                                    <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${zVol}`} style={{ height: `${zVolH <= 0 ? 0 : Math.max(8, zVolH)}%` }} />
+                                  </div>
+                                  <span className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Volume</span>
+                                  <span className="text-[11px] font-semibold text-slate-700">{formatSignedPct(item.volume_uplift_pct, 1)}</span>
+                                </div>
+                                <div className="flex flex-col items-center">
+                                  <div className="relative h-32 w-full">
+                                    <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${zRev}`} style={{ height: `${zRevH <= 0 ? 0 : Math.max(8, zRevH)}%` }} />
+                                  </div>
+                                  <span className="mt-3 text-[10px] font-bold uppercase tracking-wider text-slate-400">Revenue</span>
+                                  <span className="text-[11px] font-semibold text-slate-700">{formatSignedPct(item.revenue_uplift_pct, 1)}</span>
+                                </div>
+                                <div className="flex flex-col items-center">
+                                  <div className="relative h-32 w-full">
+                                    <div className={`absolute bottom-0 left-[12%] w-[76%] rounded-t-md ${zBud}`} style={{ height: `${zBudH <= 0 ? 0 : Math.max(2, zBudH)}%` }} />
+                                  </div>
+                                  <span className="mt-3 text-center text-[10px] font-bold uppercase tracking-[0.08em] text-slate-400">Budget Used</span>
+                                  <span className="mt-0.5 text-[12px] font-semibold text-slate-800">{formatMetric(zBudgetPct, 0)}%</span>
+                                </div>
+                              </div>
+                            </button>
+                          )
+                        })()}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 flex items-center gap-2">
+                      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">Generated nearby scenarios</span>
+                      <span className="text-xs text-slate-500">{zoomResults.pagination.total_count.toLocaleString()} generated options around the anchor budget band.</span>
+                    </div>
+
                     <div className="grid gap-4 lg:grid-cols-5">
                       {zoomResults.items.map((item) => {
                         const zBudgetPct = scenarioBudgetUtilizedPct(item)
