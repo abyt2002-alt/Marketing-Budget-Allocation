@@ -2459,13 +2459,13 @@ def _call_gemini_intent_debug(
             "temperature": 0.1,
             "maxOutputTokens": 8192,
             "responseMimeType": "application/json",
-            "thinkingConfig": {"thinkingBudget": 8000},
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
     for attempt in range(2):
         try:
             req = urlrequest.Request(url, data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"})
-            with urlrequest.urlopen(req, timeout=45) as response:
+            with urlrequest.urlopen(req, timeout=30) as response:
                 parsed = json.loads(response.read().decode("utf-8"))
             print("GEMINI_RAW_RESPONSE:", json.dumps(parsed)[:4000], flush=True)
             candidates = parsed.get("candidates", [])
