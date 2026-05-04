@@ -429,8 +429,8 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [phase, setPhase] = useState<Phase>('idle')
   const [visibleCount, setVisibleCount] = useState(0)
   const [hitlMode, setHitlMode] = useState<HitlMode>('review')
-  const [feedbackText, setFeedbackText] = useState('')
-  const [feedbackLoading, setFeedbackLoading] = useState(false)
+  const [_feedbackText, setFeedbackText] = useState('')
+  const [_feedbackLoading, setFeedbackLoading] = useState(false)
   const [expandedSteps, setExpandedSteps] = useState<Record<string, boolean>>({})
   const [approvalEvaluation, setApprovalEvaluation] = useState<ApprovedPlanEvaluationResponse | null>(null)
   const [approvalLoading, setApprovalLoading] = useState(false)
@@ -456,7 +456,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     { markets: [], direction: 'lower' },
     { markets: [], direction: 'equal' },
   ])
-  const [resultsCollapsed, setResultsCollapsed] = useState(false)
+  const [_resultsCollapsed, setResultsCollapsed] = useState(false)
   const [, setQaFeedbackText] = useState('')
   const [qaSectionCollapsed, setQaSectionCollapsed] = useState(false)
   const [expandedQaCards, setExpandedQaCards] = useState<Record<string, boolean>>({})
@@ -1128,7 +1128,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     }
   }
 
-  async function handleApprove() {
+  async function _handleApprove() {
     if (!interp || !brand) return
     setHitlMode('approved')
     setQaFeedbackText('')
@@ -1181,9 +1181,9 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const zoomGenerationActive = zoomStatus === 'queued' || zoomStatus === 'running'
 
   const confidencePct = hitl ? Math.round(hitl.confidence * 100) : null
-  const confColor = confidencePct == null ? '' : confidencePct >= 85 ? 'text-emerald-600' : confidencePct >= 65 ? 'text-amber-600' : 'text-red-500'
+  const _confColor = confidencePct == null ? '' : confidencePct >= 85 ? 'text-emerald-600' : confidencePct >= 65 ? 'text-amber-600' : 'text-red-500'
   const approvalHeadline = approvalEvaluation?.ai_review.headline || approvalEvaluation?.deterministic_overview.headline || ''
-  const approvalSummary = approvalEvaluation?.ai_review.summary || approvalEvaluation?.deterministic_overview.summary || ''
+  const _approvalSummary = approvalEvaluation?.ai_review.summary || approvalEvaluation?.deterministic_overview.summary || ''
   const supportedReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'supported') ?? []
   const mixedReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'mixed') ?? []
   const atRiskReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'at_risk') ?? []
