@@ -410,18 +410,19 @@ function cleanSignalBand(value: string | null | undefined) {
 }
 
 function normalizeQaActionValue(action: string | null | undefined) {
-  if (!action || action === 'hold') return 'maintain'
-  if (action === 'reduce' || action === 'deprioritize') return 'decrease'
-  return action
+  const normalized = String(action ?? '').trim().toLowerCase().replace(/\s+/g, '_')
+  if (!normalized || normalized === 'hold' || normalized === 'protect' || normalized === 'protected' || normalized === 'stable') return 'maintain'
+  if (normalized.includes('increase')) return 'increase'
+  if (normalized.includes('decrease') || normalized.includes('reduce') || normalized.includes('deprioritize') || normalized.includes('cut')) return 'decrease'
+  if (normalized.includes('maintain') || normalized.includes('protect')) return 'maintain'
+  return normalized
 }
 
 function dispositionForAction(action: string): Pick<MarketDisposition, 'action' | 'col' | 'tier'> {
   const normalized = normalizeQaActionValue(action)
   if (normalized === 'increase') return { action: 'Increase', col: 0, tier: 't1' }
-  if (normalized === 'slight_increase') return { action: 'Slight Increase', col: 1, tier: 't2' }
-  if (normalized === 'slight_decrease') return { action: 'Slight Decrease', col: 3, tier: 't4' }
-  if (normalized === 'decrease') return { action: 'Decrease', col: 4, tier: 't5' }
-  return { action: 'Maintain', col: 2, tier: 't3' }
+  if (normalized === 'decrease') return { action: 'Decrease', col: 2, tier: 't3' }
+  return { action: 'Maintain', col: 1, tier: 't2' }
 }
 
 function marketTextVariant(market: string, variants: string[]) {
@@ -429,101 +430,149 @@ function marketTextVariant(market: string, variants: string[]) {
   return variants[seed % variants.length]
 }
 
-function marketSignalCopy(review: ApprovedPlanMarketReview) {
+function marketSignalCopy(review: ApprovedPlanMarketReview, selectedAction?: string) {
+  const actionFamily = normalizeQaActionValue(selectedAction ?? review.action_direction)
+  const isDecrease = actionFamily === 'decrease'
+  const isMaintain = actionFamily === 'maintain'
   const positives: string[] = []
   const watchouts: string[] = []
   const bullets: Array<{ tone: 'good' | 'watch'; text: string }> = []
 
   if (review.responsiveness_label?.toLowerCase() === 'high') {
-    positives.push('responsive media')
+    ;(isDecrease ? watchouts : positives).push('responsive media')
     bullets.push({
-      tone: 'good',
-      text: marketTextVariant(review.market, [
-        'Media response is strong enough to justify added support.',
-        'Elasticity suggests this market can absorb more spend.',
-        'Response levels point to a good return window for incremental budget.',
-      ]),
+      tone: isDecrease ? 'watch' : 'good',
+      text: isDecrease
+        ? marketTextVariant(review.market, [
+            'Strong elasticity is a reason to be careful with cuts.',
+            'Responsive media means reducing spend carries opportunity cost.',
+            'Good response levels argue against cutting too aggressively.',
+          ])
+        : marketTextVariant(review.market, [
+            'Media response is strong enough to justify added support.',
+            'Elasticity suggests this market can absorb more spend.',
+            'Response levels point to a good return window for incremental budget.',
+          ]),
     })
   }
   if (review.responsiveness_label?.toLowerCase() === 'low') {
-    watchouts.push('weak media response')
+    ;(isDecrease ? positives : watchouts).push('weak media response')
     bullets.push({
-      tone: 'watch',
-      text: marketTextVariant(review.market, [
-        'Low elasticity makes extra spend harder to defend.',
-        'Media response is soft, so scaling should be limited.',
-        'Weak response signals call for a tighter budget move.',
-      ]),
+      tone: isDecrease ? 'good' : 'watch',
+      text: isDecrease
+        ? marketTextVariant(review.market, [
+            'Low elasticity supports pulling back spend.',
+            'Soft media response makes this a better candidate for reduction.',
+            'Weak response limits the downside of a budget cut.',
+          ])
+        : marketTextVariant(review.market, [
+            'Low elasticity makes extra spend harder to defend.',
+            'Media response is soft, so scaling should be limited.',
+            'Weak response signals call for a tighter budget move.',
+          ]),
     })
   }
 
   if (review.avg_cpr_band === 'low_cost') {
-    positives.push('efficient CPR')
+    ;(isDecrease ? watchouts : positives).push('efficient CPR')
     bullets.push({
-      tone: 'good',
-      text: marketTextVariant(review.market, [
-        'Low CPR keeps the increase relatively efficient.',
-        'Cost per response is favorable versus other markets.',
-        'Efficient CPR gives this market room to scale.',
-      ]),
+      tone: isDecrease ? 'watch' : 'good',
+      text: isDecrease
+        ? marketTextVariant(review.market, [
+            'Low CPR means this market is efficient, so cuts need caution.',
+            'Efficient response cost argues against reducing too much.',
+            'Favorable CPR makes this a less obvious reduction candidate.',
+          ])
+        : marketTextVariant(review.market, [
+            'Low CPR keeps the increase relatively efficient.',
+            'Cost per response is favorable versus other markets.',
+            'Efficient CPR gives this market room to scale.',
+          ]),
     })
   }
   if (review.avg_cpr_band === 'mid_cost') positives.push('workable CPR')
   if (review.avg_cpr_band === 'high_cost') {
-    watchouts.push('expensive CPR')
+    ;(isDecrease ? positives : watchouts).push('expensive CPR')
     bullets.push({
-      tone: 'watch',
-      text: marketTextVariant(review.market, [
-        'High CPR means the increase needs tighter guardrails.',
-        'Response costs are elevated, so do not over-scale blindly.',
-        'CPR pressure makes this a selective rather than automatic push.',
-      ]),
+      tone: isDecrease ? 'good' : 'watch',
+      text: isDecrease
+        ? marketTextVariant(review.market, [
+            'High CPR supports reducing inefficient spend.',
+            'Expensive response cost makes reduction more defensible.',
+            'CPR pressure is a valid reason to pull back budget.',
+          ])
+        : marketTextVariant(review.market, [
+            'High CPR means the increase needs tighter guardrails.',
+            'Response costs are elevated, so do not over-scale blindly.',
+            'CPR pressure makes this a selective rather than automatic push.',
+          ]),
     })
   }
 
   if (review.brand_salience_band === 'high') {
-    positives.push('high salience')
+    ;(isDecrease ? watchouts : positives).push('high salience')
     bullets.push({
-      tone: 'good',
-      text: marketTextVariant(review.market, [
-        'High salience improves the chance that spend converts.',
-        'Brand salience is strong, giving the plan a better runway.',
-        'Existing salience should help incremental media work harder.',
-      ]),
+      tone: isDecrease ? 'watch' : 'good',
+      text: isDecrease
+        ? marketTextVariant(review.market, [
+            'High salience is a reason to avoid deep cuts.',
+            'Strong brand salience means reductions should be measured.',
+            'Existing salience makes this market worth protecting.',
+          ])
+        : marketTextVariant(review.market, [
+            'High salience improves the chance that spend converts.',
+            'Brand salience is strong, giving the plan a better runway.',
+            'Existing salience should help incremental media work harder.',
+          ]),
     })
   }
-  if (review.brand_salience_band === 'low') watchouts.push('low salience')
+  if (review.brand_salience_band === 'low') {
+    ;(isDecrease ? positives : watchouts).push('low salience')
+  }
 
   if ((review.change_in_market_share ?? 0) < 0) {
-    positives.push('share recovery')
+    ;(isDecrease ? watchouts : positives).push('share recovery')
     bullets.push({
-      tone: 'good',
-      text: marketTextVariant(review.market, [
-        'Share softness makes recovery investment defensible.',
-        'Losing share gives this market a clear recovery job.',
-        'Recent share decline supports intervention.',
-      ]),
+      tone: isDecrease ? 'watch' : 'good',
+      text: isDecrease
+        ? marketTextVariant(review.market, [
+            'Share is already soft, so cutting could worsen recovery.',
+            'Losing share is a caution against reducing too far.',
+            'Share decline argues for restraint on budget cuts.',
+          ])
+        : marketTextVariant(review.market, [
+            'Share softness makes recovery investment defensible.',
+            'Losing share gives this market a clear recovery job.',
+            'Recent share decline supports intervention.',
+          ]),
     })
   }
   if ((review.change_in_brand_equity ?? 0) < 0) {
-    positives.push('equity support')
+    ;(isDecrease ? watchouts : positives).push('equity support')
     bullets.push({
-      tone: 'good',
-      text: marketTextVariant(review.market, [
-        'Brand equity is slipping, adding a brand-support reason.',
-        'Equity decline strengthens the case for intervention.',
-        'Softer equity makes support more urgent.',
-      ]),
+      tone: isDecrease ? 'watch' : 'good',
+      text: isDecrease
+        ? marketTextVariant(review.market, [
+            'Equity is slipping, so reductions should be limited.',
+            'Brand equity decline is a caution against cutting support.',
+            'Softer equity weakens the case for an aggressive cut.',
+          ])
+        : marketTextVariant(review.market, [
+            'Brand equity is slipping, adding a brand-support reason.',
+            'Equity decline strengthens the case for intervention.',
+            'Softer equity makes support more urgent.',
+          ]),
     })
   }
 
   const positiveText = positives.slice(0, 3).join(', ')
   const watchoutText = watchouts.slice(0, 2).join(', ')
 
+  const summaryPrefix = isDecrease ? 'Reduction case' : isMaintain ? 'Maintain case' : 'Growth case'
   const summary = review.verdict === 'supported'
     ? `Clear case: ${positiveText || review.summary}`
     : review.verdict === 'mixed'
-      ? `Selective case: ${positiveText || 'some demand signals'}${watchoutText ? `; watch ${watchoutText}` : ''}`
+      ? `${summaryPrefix}: ${positiveText || 'some useful signals'}${watchoutText ? `; watch ${watchoutText}` : ''}`
       : review.verdict === 'at_risk'
         ? `Pressure test: ${watchoutText || review.warning_points[0] || review.summary}`
         : `Needs more data before changing spend.`
@@ -532,9 +581,9 @@ function marketSignalCopy(review: ApprovedPlanMarketReview) {
     summary,
     bullets: bullets.slice(0, 3),
     signals: [
-      { label: 'Elasticity', value: cleanSignalBand(review.responsiveness_label), tone: review.responsiveness_label?.toLowerCase() === 'high' ? 'good' : 'neutral' },
-      { label: 'CPR', value: cleanSignalBand(review.avg_cpr_band), tone: review.avg_cpr_band === 'high_cost' ? 'watch' : review.avg_cpr_band === 'low_cost' ? 'good' : 'neutral' },
-      { label: 'Salience', value: cleanSignalBand(review.brand_salience_band), tone: review.brand_salience_band === 'high' ? 'good' : 'neutral' },
+      { label: 'Elasticity', value: cleanSignalBand(review.responsiveness_label), tone: review.responsiveness_label?.toLowerCase() === 'high' ? (isDecrease ? 'watch' : 'good') : review.responsiveness_label?.toLowerCase() === 'low' && isDecrease ? 'good' : 'neutral' },
+      { label: 'CPR', value: cleanSignalBand(review.avg_cpr_band), tone: review.avg_cpr_band === 'high_cost' ? (isDecrease ? 'good' : 'watch') : review.avg_cpr_band === 'low_cost' ? (isDecrease ? 'watch' : 'good') : 'neutral' },
+      { label: 'Salience', value: cleanSignalBand(review.brand_salience_band), tone: review.brand_salience_band === 'high' ? (isDecrease ? 'watch' : 'good') : review.brand_salience_band === 'low' && isDecrease ? 'good' : 'neutral' },
     ],
   }
 }
@@ -579,6 +628,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [scenarioSortDir] = useState<'asc' | 'desc'>('desc')
   const [scenarioMinVolumePct, setScenarioMinVolumePct] = useState('')
   const [scenarioMinRevenuePct, setScenarioMinRevenuePct] = useState('')
+  const [scenarioMinBudgetUtilizedPctFilter, setScenarioMinBudgetUtilizedPctFilter] = useState('')
   const [scenarioMaxBudgetUtilizedPctFilter, setScenarioMaxBudgetUtilizedPctFilter] = useState('')
   const [scenarioSectionCollapsed, setScenarioSectionCollapsed] = useState(false)
   const [scenarioReachFilters, setScenarioReachFilters] = useState<ScenarioReachFilter[]>([
@@ -601,7 +651,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [modalSCurveMarket, setModalSCurveMarket] = useState<string | null>(null)
   const [modalSCurveLoading, setModalSCurveLoading] = useState(false)
   const [modalSCurveError, setModalSCurveError] = useState('')
-  const [understandingCollapsed, setUnderstandingCollapsed] = useState(false)
+  const [understandingCollapsed, setUnderstandingCollapsed] = useState(true)
   const [scenarioPlanMessage, setScenarioPlanMessage] = useState('')
   const [savedScenarioPlans, setSavedScenarioPlans] = useState<SavedScenarioPlan[]>([])
   const [savedPlansOpen, setSavedPlansOpen] = useState(false)
@@ -725,12 +775,12 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       }
     }, 2500)
     return () => window.clearInterval(interval)
-  }, [apiBaseUrl, scenarioJobId, scenarioStatus, scenarioPage, scenarioSortKey, scenarioSortDir, scenarioMinVolumePct, scenarioMinRevenuePct, scenarioMaxBudgetUtilizedPctFilter, scenarioReachFilters])
+  }, [apiBaseUrl, scenarioJobId, scenarioStatus, scenarioPage, scenarioSortKey, scenarioSortDir, scenarioMinVolumePct, scenarioMinRevenuePct, scenarioMinBudgetUtilizedPctFilter, scenarioMaxBudgetUtilizedPctFilter, scenarioReachFilters])
 
   useEffect(() => {
     if (!scenarioJobId || scenarioStatus !== 'completed') return
     void fetchScenarioResults(scenarioJobId, scenarioPage)
-  }, [scenarioJobId, scenarioStatus, scenarioPage, scenarioSortKey, scenarioSortDir, scenarioMinVolumePct, scenarioMinRevenuePct, scenarioMaxBudgetUtilizedPctFilter, scenarioReachFilters])
+  }, [scenarioJobId, scenarioStatus, scenarioPage, scenarioSortKey, scenarioSortDir, scenarioMinVolumePct, scenarioMinRevenuePct, scenarioMinBudgetUtilizedPctFilter, scenarioMaxBudgetUtilizedPctFilter, scenarioReachFilters])
 
   useEffect(() => {
     if (!zoomJobId) return
@@ -832,7 +882,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       const steps = res.data.normalized_interpretation?.steps ?? []
       startReveal(steps)
       setSetupCollapsed(true)
-      setUnderstandingCollapsed(false)
+      setUnderstandingCollapsed(true)
       // Auto-approve: skip "Does this look right?" and go straight to QA
       const freshInterp = res.data.normalized_interpretation
       if (freshInterp && brand) {
@@ -906,6 +956,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     }
     if (scenarioMinVolumePct.trim() !== '') params.min_volume_uplift_pct = Number(scenarioMinVolumePct)
     if (scenarioMinRevenuePct.trim() !== '') params.min_revenue_uplift_pct = Number(scenarioMinRevenuePct)
+    if (scenarioMinBudgetUtilizedPctFilter.trim() !== '') params.min_budget_utilized_pct = Number(scenarioMinBudgetUtilizedPctFilter)
     if (scenarioMaxBudgetUtilizedPctFilter.trim() !== '') params.max_budget_utilized_pct = Number(scenarioMaxBudgetUtilizedPctFilter)
     scenarioReachFilters.filter(f => f.markets.length > 0).slice(0, 2).forEach((filter, index) => {
       const suffix = index === 0 ? '' : '_2'
@@ -1268,10 +1319,14 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   // Scoring grid data — available after backend returns scoring_tiers
   const scoringTiers = interp?.scoring_tiers ?? []
   const dispositions = interp?.market_dispositions ?? []
+  const simplifiedScoringTiers: ScoringTier[] = [
+    { col: 0, id: 'increase', range: '', action: 'Increase' },
+    { col: 1, id: 'maintain', range: '', action: 'Maintain' },
+    { col: 2, id: 'decrease', range: '', action: 'Decrease' },
+  ]
   const displayDispositions = useMemo(
     () => dispositions.map((disposition) => {
-      const selectedAction = qaActionSelections[disposition.market]
-      if (!selectedAction) return disposition
+      const selectedAction = qaActionSelections[disposition.market] ?? disposition.action
       return {
         ...disposition,
         ...dispositionForAction(selectedAction),
@@ -1281,7 +1336,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   )
   const activeDispositions = displayDispositions.filter((d) => d.col >= 0)
   const excludedDispositions = displayDispositions.filter((d) => d.col < 0)
-  const showScoringGrid = allRevealed && scoringTiers.length > 0 && dispositions.length > 0
+  const showScoringGrid = allRevealed && dispositions.length > 0
   const handoffIncreaseMarkets = scenarioHandoff?.resolved_intent.target_markets ?? []
   const handoffDecreaseMarkets = scenarioHandoff?.resolved_intent.deprioritized_markets ?? []
   const handoffHoldMarkets = [
@@ -2284,6 +2339,65 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                           )}
                         </div>
 
+                        {/* 5-Column Market Scoring Grid */}
+                        {showScoringGrid && (
+                          <div className="space-y-2">
+                            <div className="flex items-baseline justify-between">
+                              <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">
+                                Market Scoring — {dispositions.length} markets
+                              </p>
+                              <p className="text-[10px] text-slate-400">Current card actions · updates live</p>
+                            </div>
+
+                            <div className="grid gap-1.5 md:grid-cols-3">
+                              {simplifiedScoringTiers.map((tier) => {
+                                const s = colStyle[tier.col] ?? colStyle[2]
+                                const group = activeDispositions.filter((d) => d.col === tier.col)
+                                return (
+                                  <div key={tier.id} className={`rounded-xl border p-2.5 ${s.bg} ${s.border}`}>
+                                    <div className="space-y-0.5">
+                                      <p className={`text-[10px] font-bold uppercase tracking-[0.1em] ${s.head}`}>{tier.action}</p>
+                                    </div>
+                                    <div className="mt-2 h-1 w-full rounded-full bg-white/60">
+                                      <div className={`h-1 rounded-full ${s.bar}`} style={{ width: `${tier.col === 1 ? 50 : 100}%` }} />
+                                    </div>
+                                    <div className="mt-2 space-y-1.5">
+                                      {group.length === 0 ? (
+                                        <p className="text-[10px] italic text-slate-300">—</p>
+                                      ) : group.map((d) => (
+                                        <div key={d.market}>
+                                          <div className="flex items-center justify-between gap-0.5">
+                                            <span className="truncate text-[11px] font-medium text-slate-700 leading-tight">{d.market}</span>
+                                            <span className={`shrink-0 text-[10px] font-semibold tabular-nums ${s.score}`}>
+                                              {d.criteria_total > 0 ? `${d.criteria_met}/${d.criteria_total}` : '—'}
+                                            </span>
+                                          </div>
+                                          <div className="mt-0.5 h-0.5 w-full rounded-full bg-white/50">
+                                            <div className={`h-0.5 rounded-full ${s.bar} opacity-70`} style={{ width: `${d.score_pct}%` }} />
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                    <p className={`mt-2 text-right text-[10px] font-bold ${s.head}`}>{group.length}</p>
+                                  </div>
+                                )
+                              })}
+                            </div>
+
+                            {excludedDispositions.length > 0 && (
+                              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-dashed border-rose-200 bg-rose-50/60 px-3 py-2">
+                                <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-rose-500">Excluded</span>
+                                <span className="text-[10px] text-rose-400">·</span>
+                                {excludedDispositions.map((d) => (
+                                  <span key={d.market} className="rounded-full bg-rose-100 px-2 py-0.5 text-[10px] font-semibold text-rose-600">
+                                    {d.market}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
                           <p className="text-xs font-bold uppercase tracking-[0.12em] text-slate-600">Market Signals <span className="ml-1 font-normal normal-case tracking-normal text-slate-400">— sorted by brand salience</span></p>
                           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 max-h-[34rem] overflow-y-auto pr-1">
@@ -2293,33 +2407,24 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                                 : review.verdict === 'at_risk'
                                   ? 'border-rose-200 bg-rose-50'
                                   : 'border-amber-200 bg-amber-50'
-                              const verdictBadge = review.verdict === 'supported'
-                                ? 'bg-emerald-100 text-emerald-700'
-                                : review.verdict === 'at_risk'
-                                  ? 'bg-rose-100 text-rose-700'
-                                  : 'bg-amber-100 text-amber-700'
-                              const signalCopy = marketSignalCopy(review)
+                              const selectedAction = qaActionSelections[review.market] ?? normalizeQaActionValue(review.action_direction)
+                              const signalCopy = marketSignalCopy(review, selectedAction)
                               return (
                                 <div key={review.market} className={`rounded-2xl border px-4 py-3 ${verdictColor}`}>
                                   <div className="flex items-start justify-between gap-2">
                                     <p className="font-semibold text-slate-800 text-sm">{review.market}</p>
-                                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${verdictBadge}`}>
-                                      {review.verdict === 'at_risk' ? 'At risk' : review.verdict === 'supported' ? 'Supported' : 'Mixed'}
-                                    </span>
                                   </div>
                                   <div className="mt-2 flex items-center gap-2">
                                     <label className="shrink-0 text-[10px] font-bold uppercase tracking-[0.12em] text-slate-500">
                                       Action
                                     </label>
                                     <select
-                                      value={qaActionSelections[review.market] ?? normalizeQaActionValue(review.action_direction)}
+                                      value={selectedAction}
                                       onChange={(event) => setQaActionSelection(review.market, event.target.value)}
                                       className="min-w-0 flex-1 rounded-lg border border-white/80 bg-white/80 px-2 py-1 text-[11px] font-semibold text-slate-700 outline-none transition focus:border-[#9c7a4a] focus:ring-2 focus:ring-[#d7cbb7]"
                                     >
                                       <option value="increase">Increase</option>
-                                      <option value="slight_increase">Slight increase</option>
                                       <option value="maintain">Maintain</option>
-                                      <option value="slight_decrease">Slight decrease</option>
                                       <option value="decrease">Decrease</option>
                                     </select>
                                   </div>
@@ -2365,7 +2470,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
 
 
               {/* 5-Column Market Scoring Grid */}
-              {showScoringGrid && (
+              {false && showScoringGrid && (
                 <div className="mt-4 space-y-2">
                   <div className="flex items-baseline justify-between">
                     <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">
@@ -2879,7 +2984,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   </div>
 
                   <div ref={reachFiltersRef} className="grid gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 lg:grid-cols-12">
-                    <div className="lg:col-span-3">
+                    <div className="lg:col-span-2">
                       <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Sort by</label>
                       <select value={scenarioSortKey} onChange={(e) => { setScenarioSortKey(e.target.value); setScenarioPage(1) }}
                         className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700">
@@ -2888,21 +2993,28 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                         <option value="balanced_score">Balanced score</option>
                       </select>
                     </div>
-                    <div className="lg:col-span-3">
+                    <div className="lg:col-span-2">
                       <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Min Volume Uplift %</label>
                       <input type="number" step="0.01" value={scenarioMinVolumePct}
                         onChange={(e) => { setScenarioMinVolumePct(e.target.value); setScenarioPage(1) }}
                         className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
                         placeholder="e.g. 2.0" />
                     </div>
-                    <div className="lg:col-span-3">
+                    <div className="lg:col-span-2">
                       <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Min Revenue Uplift %</label>
                       <input type="number" step="0.01" value={scenarioMinRevenuePct}
                         onChange={(e) => { setScenarioMinRevenuePct(e.target.value); setScenarioPage(1) }}
                         className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
                         placeholder="e.g. 2.5" />
                     </div>
-                    <div className="lg:col-span-3">
+                    <div className="lg:col-span-2">
+                      <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Min Budget Used %</label>
+                      <input type="number" step="0.01" value={scenarioMinBudgetUtilizedPctFilter}
+                        onChange={(e) => { setScenarioMinBudgetUtilizedPctFilter(e.target.value); setScenarioPage(1) }}
+                        className="mt-1.5 w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700"
+                        placeholder="e.g. 80" />
+                    </div>
+                    <div className="lg:col-span-2">
                       <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Max Budget Utilized %</label>
                       <input type="number" step="0.01" value={scenarioMaxBudgetUtilizedPctFilter}
                         onChange={(e) => { setScenarioMaxBudgetUtilizedPctFilter(e.target.value); setScenarioPage(1) }}

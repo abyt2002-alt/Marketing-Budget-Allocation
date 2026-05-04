@@ -983,6 +983,117 @@ def _action_to_col(action_direction: str) -> int:
     return 2
 
 
+def _numeric_cutoffs(rows: list[dict[str, Any]], metric_key: str) -> tuple[float | None, float | None]:
+    values = sorted(
+        float(value)
+        for row in rows
+        for value in [_safe_float(row.get(metric_key))]
+        if value is not None and math.isfinite(float(value))
+    )
+    if not values:
+        return None, None
+    low_idx = max(0, min(len(values) - 1, int((len(values) - 1) * 0.33)))
+    high_idx = max(0, min(len(values) - 1, int((len(values) - 1) * 0.67)))
+    return values[low_idx], values[high_idx]
+
+
+def _auto_action_thresholds(rows: list[dict[str, Any]]) -> dict[str, tuple[float | None, float | None]]:
+    return {
+        "category_salience": _numeric_cutoffs(rows, "category_salience"),
+        "brand_salience": _numeric_cutoffs(rows, "brand_salience"),
+        "overall_media_elasticity": _numeric_cutoffs(rows, "overall_media_elasticity"),
+        "avg_cpr": _numeric_cutoffs(rows, "avg_cpr"),
+    }
+
+
+def _is_high_metric(row: dict[str, Any], thresholds: dict[str, tuple[float | None, float | None]], metric_key: str) -> bool:
+    value = _safe_float(row.get(metric_key))
+    _low, high = thresholds.get(metric_key, (None, None))
+    return value is not None and high is not None and value >= high
+
+
+def _is_low_metric(row: dict[str, Any], thresholds: dict[str, tuple[float | None, float | None]], metric_key: str) -> bool:
+    value = _safe_float(row.get(metric_key))
+    low, _high = thresholds.get(metric_key, (None, None))
+    return value is not None and low is not None and value <= low
+
+
+def _auto_signal_action_for_market(
+    row: dict[str, Any],
+    thresholds: dict[str, tuple[float | None, float | None]],
+) -> tuple[str, float, list[str]]:
+    """
+    Deterministic fallback for markets not explicitly assigned by the prompt.
+    Heavier positive weight goes to salience + elasticity + low CPR so the
+    fallback is stable and does not depend on Gemini phrasing.
+    """
+    score = 0.0
+    reasons: list[str] = []
+
+    if str(row.get("brand_salience_band") or "").lower() == "high" or _is_high_metric(row, thresholds, "brand_salience"):
+        score += 3.0
+        reasons.append("high brand salience")
+    elif str(row.get("brand_salience_band") or "").lower() == "low" or _is_low_metric(row, thresholds, "brand_salience"):
+        score -= 2.0
+        reasons.append("low brand salience")
+
+    if _is_high_metric(row, thresholds, "category_salience"):
+        score += 2.0
+        reasons.append("strong category salience")
+    elif _is_low_metric(row, thresholds, "category_salience"):
+        score -= 1.0
+        reasons.append("low category salience")
+
+    if _is_high_responsiveness(row) or _is_high_metric(row, thresholds, "overall_media_elasticity"):
+        score += 3.0
+        reasons.append("good elasticity")
+    elif _is_low_responsiveness(row) or _is_low_metric(row, thresholds, "overall_media_elasticity"):
+        score -= 3.0
+        reasons.append("weak elasticity")
+
+    avg_cpr_band = str(row.get("avg_cpr_band") or "unknown").lower()
+    if avg_cpr_band == "low_cost" or _is_low_metric(row, thresholds, "avg_cpr"):
+        score += 2.0
+        reasons.append("low CPR")
+    elif avg_cpr_band == "high_cost" or _is_high_metric(row, thresholds, "avg_cpr"):
+        score -= 2.0
+        reasons.append("high CPR")
+
+    share_change = _safe_float(row.get("change_in_market_share"))
+    if share_change is not None and share_change < 0:
+        score += 1.5
+        reasons.append("market share needs recovery")
+    elif share_change is not None and share_change > 0:
+        score -= 0.5
+        reasons.append("market share already improving")
+
+    equity_change = _safe_float(row.get("change_in_brand_equity"))
+    if equity_change is not None and equity_change < 0:
+        score += 1.0
+        reasons.append("brand equity needs support")
+    elif equity_change is not None and equity_change > 0:
+        score -= 0.5
+        reasons.append("brand equity already improving")
+
+    if score >= 3.0:
+        return "increase", score, reasons
+    if score <= -3.0:
+        return "decrease", score, reasons
+    return "maintain", score, reasons or ["mixed market signals"]
+
+
+def _prompt_explicitly_requests_action(prompt: str, action_direction: str) -> bool:
+    text = prompt.lower()
+    action = action_direction.strip().lower()
+    if action in {"increase", "slight_increase", "recover", "focus"}:
+        return bool(re.search(r"\b(increase|raise|grow|scale|push|boost|invest|support|recover|focus)\b", text))
+    if action in {"decrease", "slight_decrease", "reduce", "deprioritize", "cut"}:
+        return bool(re.search(r"\b(decrease|reduce|cut|lower|deprioriti[sz]e|pull back)\b", text))
+    if action in {"protect", "hold", "maintain", "rebalance"}:
+        return bool(re.search(r"\b(protect|hold|maintain|keep|stable|preserve|defend)\b", text))
+    return False
+
+
 def _normalize_segment(raw_seg: dict[str, Any], available_markets: list[str], prompt: str, seg_idx: int) -> dict[str, Any] | None:
     raw_steps = raw_seg.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
@@ -1017,12 +1128,16 @@ def _compute_dispositions_from_segments(
     rows: list[dict[str, Any]],
     segments: list[dict[str, Any]],
     exceptions: list[dict[str, Any]],
+    prompt: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     row_map = {str(row.get("market") or "").strip(): row for row in rows if str(row.get("market") or "").strip()}
     candidate_assignments: dict[str, list[dict[str, Any]]] = {}
     for seg_idx, seg in enumerate(segments):
         label = str(seg.get("label") or seg.get("id") or "")
         action_direction = str(seg.get("action_direction") or "increase").strip().lower()
+        action_family = _normalize_action_family(action_direction)
+        if action_family == "maintain" and not _prompt_explicitly_requests_action(prompt, action_direction):
+            continue
         for market in seg.get("matched_markets", []):
             market_name = str(market or "").strip()
             if not market_name:
@@ -1032,7 +1147,7 @@ def _compute_dispositions_from_segments(
                     "market": market_name,
                     "label": label,
                     "action_direction": action_direction,
-                    "action_family": _normalize_action_family(action_direction),
+                    "action_family": action_family,
                     "segment_index": seg_idx,
                 }
             )
@@ -1135,6 +1250,7 @@ def _compute_dispositions_from_segments(
                         "conflict_reason": "Explicit exception selected this action.",
                     }
                 )
+    auto_thresholds = _auto_action_thresholds(rows)
     tier_defs = [{"col": i, "id": f"t{i + 1}", "range": FIXED_TIER_RANGES[i], "action": FIXED_SPECTRUM[i]} for i in range(5)]
     dispositions: list[dict[str, Any]] = []
     for row in rows:
@@ -1147,11 +1263,26 @@ def _compute_dispositions_from_segments(
                 "segment": seg_label, "is_exception": market in exception_markets,
             })
         else:
+            auto_action, auto_score, auto_reasons = _auto_signal_action_for_market(row, auto_thresholds)
+            auto_col = _action_to_col(auto_action)
+            auto_summary = "Auto signal decision: " + ", ".join(auto_reasons[:4]) + "."
             dispositions.append({
-                "market": market, "tier": "t3", "col": 2, "action": "Maintain",
-                "score": 0.0, "score_pct": 0, "criteria_met": 0, "criteria_total": 0,
-                "segment": None, "is_exception": False,
+                "market": market, "tier": f"t{auto_col + 1}", "col": auto_col, "action": FIXED_SPECTRUM[auto_col],
+                "score": round(auto_score, 2), "score_pct": max(0, min(100, round((auto_score + 10) * 5))),
+                "criteria_met": 0, "criteria_total": 0,
+                "segment": "Auto signal decision", "is_exception": False,
+                "auto_decided": True, "auto_decision_reason": auto_summary,
             })
+            resolved_market_actions.append(
+                {
+                    "market": market,
+                    "action_direction": auto_action,
+                    "action_family": _normalize_action_family(auto_action),
+                    "source_label": "Auto signal decision",
+                    "conflict_reason": auto_summary,
+                    "auto_decided": True,
+                }
+            )
     dispositions.sort(key=lambda x: (x["col"], x["market"]))
     return dispositions, tier_defs, conflict_resolutions, resolved_market_actions
 
@@ -1195,17 +1326,22 @@ def _normalize_multi_segment_plan(
                 "action_direction": str(exc.get("action_direction") or "increase").strip().lower(),
                 "reason": str(exc.get("reason") or "explicit exception"),
             })
-    market_dispositions, scoring_tiers, conflict_resolutions, resolved_market_actions = _compute_dispositions_from_segments(rows, segments, exceptions)
+    market_dispositions, scoring_tiers, conflict_resolutions, resolved_market_actions = _compute_dispositions_from_segments(rows, segments, exceptions, prompt)
     all_matched = list({m for seg in segments for m in seg.get("matched_markets", [])})
+    auto_decided_count = sum(1 for item in resolved_market_actions if item.get("auto_decided"))
     if conflict_resolutions:
         notes.append(f"{len(conflict_resolutions)} markets matched conflicting segment actions and were auto-resolved.")
+    if auto_decided_count:
+        notes.append(
+            f"{auto_decided_count} unspecified markets were assigned by deterministic signal weights: salience, elasticity, CPR, market share, and brand equity."
+        )
     reasoning = str(parsed.get("reasoning") or "").strip()
     if not reasoning:
         seg_summaries = [f"{s.get('label','segment')} ({len(s.get('matched_markets',[]))} markets, {s.get('action_direction','increase')})" for s in segments]
         reasoning = (
             f"This is a multi-condition strategy targeting {len(segments)} distinct market groups: {'; '.join(seg_summaries)}. "
             f"Each group was identified using different performance signals from the data. "
-            f"The plan aims to tailor budget actions to the specific needs of each market cluster."
+            f"The plan keeps explicitly requested markets fixed, then uses deterministic signal weights for unspecified markets."
         )
     return {
         "goal": str(parsed.get("goal") or prompt).strip() or prompt,
@@ -1435,6 +1571,8 @@ def _extract_approved_market_actions(interpretation: dict[str, Any]) -> list[dic
                 "action_direction": str(item.get("action_direction") or "maintain").strip().lower(),
                 "action_family": _normalize_action_family(str(item.get("action_direction") or "maintain")),
                 "source_label": str(item.get("source_label") or "Resolved action").strip() or "Resolved action",
+                "conflict_reason": str(item.get("conflict_reason") or "").strip(),
+                "auto_decided": bool(item.get("auto_decided")),
                 "source_type": "resolved",
             }
             for item in resolved_market_actions
