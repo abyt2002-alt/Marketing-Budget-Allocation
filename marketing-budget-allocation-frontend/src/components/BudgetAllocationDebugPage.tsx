@@ -405,8 +405,138 @@ function segmentAccent(action: string): { bg: string; text: string; badge: strin
   return { bg: 'bg-slate-50', text: 'text-slate-600', badge: 'bg-slate-100 text-slate-600', dot: 'bg-slate-400' }
 }
 
-function formatActionLabel(action: string) {
-  return action.replace(/_/g, ' ')
+function cleanSignalBand(value: string | null | undefined) {
+  return value ? value.replace(/_/g, ' ') : 'unknown'
+}
+
+function normalizeQaActionValue(action: string | null | undefined) {
+  if (!action || action === 'hold') return 'maintain'
+  if (action === 'reduce' || action === 'deprioritize') return 'decrease'
+  return action
+}
+
+function dispositionForAction(action: string): Pick<MarketDisposition, 'action' | 'col' | 'tier'> {
+  const normalized = normalizeQaActionValue(action)
+  if (normalized === 'increase') return { action: 'Increase', col: 0, tier: 't1' }
+  if (normalized === 'slight_increase') return { action: 'Slight Increase', col: 1, tier: 't2' }
+  if (normalized === 'slight_decrease') return { action: 'Slight Decrease', col: 3, tier: 't4' }
+  if (normalized === 'decrease') return { action: 'Decrease', col: 4, tier: 't5' }
+  return { action: 'Maintain', col: 2, tier: 't3' }
+}
+
+function marketTextVariant(market: string, variants: string[]) {
+  const seed = market.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0)
+  return variants[seed % variants.length]
+}
+
+function marketSignalCopy(review: ApprovedPlanMarketReview) {
+  const positives: string[] = []
+  const watchouts: string[] = []
+  const bullets: Array<{ tone: 'good' | 'watch'; text: string }> = []
+
+  if (review.responsiveness_label?.toLowerCase() === 'high') {
+    positives.push('responsive media')
+    bullets.push({
+      tone: 'good',
+      text: marketTextVariant(review.market, [
+        'Media response is strong enough to justify added support.',
+        'Elasticity suggests this market can absorb more spend.',
+        'Response levels point to a good return window for incremental budget.',
+      ]),
+    })
+  }
+  if (review.responsiveness_label?.toLowerCase() === 'low') {
+    watchouts.push('weak media response')
+    bullets.push({
+      tone: 'watch',
+      text: marketTextVariant(review.market, [
+        'Low elasticity makes extra spend harder to defend.',
+        'Media response is soft, so scaling should be limited.',
+        'Weak response signals call for a tighter budget move.',
+      ]),
+    })
+  }
+
+  if (review.avg_cpr_band === 'low_cost') {
+    positives.push('efficient CPR')
+    bullets.push({
+      tone: 'good',
+      text: marketTextVariant(review.market, [
+        'Low CPR keeps the increase relatively efficient.',
+        'Cost per response is favorable versus other markets.',
+        'Efficient CPR gives this market room to scale.',
+      ]),
+    })
+  }
+  if (review.avg_cpr_band === 'mid_cost') positives.push('workable CPR')
+  if (review.avg_cpr_band === 'high_cost') {
+    watchouts.push('expensive CPR')
+    bullets.push({
+      tone: 'watch',
+      text: marketTextVariant(review.market, [
+        'High CPR means the increase needs tighter guardrails.',
+        'Response costs are elevated, so do not over-scale blindly.',
+        'CPR pressure makes this a selective rather than automatic push.',
+      ]),
+    })
+  }
+
+  if (review.brand_salience_band === 'high') {
+    positives.push('high salience')
+    bullets.push({
+      tone: 'good',
+      text: marketTextVariant(review.market, [
+        'High salience improves the chance that spend converts.',
+        'Brand salience is strong, giving the plan a better runway.',
+        'Existing salience should help incremental media work harder.',
+      ]),
+    })
+  }
+  if (review.brand_salience_band === 'low') watchouts.push('low salience')
+
+  if ((review.change_in_market_share ?? 0) < 0) {
+    positives.push('share recovery')
+    bullets.push({
+      tone: 'good',
+      text: marketTextVariant(review.market, [
+        'Share softness makes recovery investment defensible.',
+        'Losing share gives this market a clear recovery job.',
+        'Recent share decline supports intervention.',
+      ]),
+    })
+  }
+  if ((review.change_in_brand_equity ?? 0) < 0) {
+    positives.push('equity support')
+    bullets.push({
+      tone: 'good',
+      text: marketTextVariant(review.market, [
+        'Brand equity is slipping, adding a brand-support reason.',
+        'Equity decline strengthens the case for intervention.',
+        'Softer equity makes support more urgent.',
+      ]),
+    })
+  }
+
+  const positiveText = positives.slice(0, 3).join(', ')
+  const watchoutText = watchouts.slice(0, 2).join(', ')
+
+  const summary = review.verdict === 'supported'
+    ? `Clear case: ${positiveText || review.summary}`
+    : review.verdict === 'mixed'
+      ? `Selective case: ${positiveText || 'some demand signals'}${watchoutText ? `; watch ${watchoutText}` : ''}`
+      : review.verdict === 'at_risk'
+        ? `Pressure test: ${watchoutText || review.warning_points[0] || review.summary}`
+        : `Needs more data before changing spend.`
+
+  return {
+    summary,
+    bullets: bullets.slice(0, 3),
+    signals: [
+      { label: 'Elasticity', value: cleanSignalBand(review.responsiveness_label), tone: review.responsiveness_label?.toLowerCase() === 'high' ? 'good' : 'neutral' },
+      { label: 'CPR', value: cleanSignalBand(review.avg_cpr_band), tone: review.avg_cpr_band === 'high_cost' ? 'watch' : review.avg_cpr_band === 'low_cost' ? 'good' : 'neutral' },
+      { label: 'Salience', value: cleanSignalBand(review.brand_salience_band), tone: review.brand_salience_band === 'high' ? 'good' : 'neutral' },
+    ],
+  }
 }
 
 export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
@@ -459,8 +589,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [_resultsCollapsed, setResultsCollapsed] = useState(false)
   const [, setQaFeedbackText] = useState('')
   const [qaSectionCollapsed, setQaSectionCollapsed] = useState(false)
-  const [expandedQaCards, setExpandedQaCards] = useState<Record<string, boolean>>({})
-  const [qaActionExpanded, setQaActionExpanded] = useState<Record<string, boolean>>({})
   const [qaActionSelections, setQaActionSelections] = useState<Record<string, string>>({})
   const [qaSaveMessage, setQaSaveMessage] = useState('')
   const [scenarioModal, setScenarioModal] = useState<ScenarioItem | null>(null)
@@ -473,8 +601,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [modalSCurveMarket, setModalSCurveMarket] = useState<string | null>(null)
   const [modalSCurveLoading, setModalSCurveLoading] = useState(false)
   const [modalSCurveError, setModalSCurveError] = useState('')
-  const [scoringGridCollapsed, setScoringGridCollapsed] = useState(true)
-  const [stepsCollapsed, setStepsCollapsed] = useState(true)
+  const [understandingCollapsed, setUnderstandingCollapsed] = useState(false)
   const [scenarioPlanMessage, setScenarioPlanMessage] = useState('')
   const [savedScenarioPlans, setSavedScenarioPlans] = useState<SavedScenarioPlan[]>([])
   const [savedPlansOpen, setSavedPlansOpen] = useState(false)
@@ -705,7 +832,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       const steps = res.data.normalized_interpretation?.steps ?? []
       startReveal(steps)
       setSetupCollapsed(true)
-      setStepsCollapsed(true)
+      setUnderstandingCollapsed(false)
       // Auto-approve: skip "Does this look right?" and go straight to QA
       const freshInterp = res.data.normalized_interpretation
       if (freshInterp && brand) {
@@ -1131,6 +1258,9 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
 
   const interp = result?.normalized_interpretation ?? null
   const steps = interp?.steps ?? []
+  const segmentStepCount = (interp?.segments ?? []).reduce((count, segment) => count + segment.steps.length, 0)
+  const interpretationStepCount = interp?.is_multi_segment ? segmentStepCount : steps.length
+  const hasInterpretationSteps = interpretationStepCount > 0
   const visibleSteps = steps.slice(0, visibleCount)
   const allRevealed = phase === 'done'
   const finalMarkets = interp?.matched_markets ?? []
@@ -1138,10 +1268,20 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   // Scoring grid data — available after backend returns scoring_tiers
   const scoringTiers = interp?.scoring_tiers ?? []
   const dispositions = interp?.market_dispositions ?? []
-  const activeDispositions = dispositions.filter((d) => d.col >= 0)
-  const excludedDispositions = dispositions.filter((d) => d.col < 0)
+  const displayDispositions = useMemo(
+    () => dispositions.map((disposition) => {
+      const selectedAction = qaActionSelections[disposition.market]
+      if (!selectedAction) return disposition
+      return {
+        ...disposition,
+        ...dispositionForAction(selectedAction),
+      }
+    }),
+    [dispositions, qaActionSelections],
+  )
+  const activeDispositions = displayDispositions.filter((d) => d.col >= 0)
+  const excludedDispositions = displayDispositions.filter((d) => d.col < 0)
   const showScoringGrid = allRevealed && scoringTiers.length > 0 && dispositions.length > 0
-  const conflictResolutions = interp?.conflict_resolutions ?? []
   const handoffIncreaseMarkets = scenarioHandoff?.resolved_intent.target_markets ?? []
   const handoffDecreaseMarkets = scenarioHandoff?.resolved_intent.deprioritized_markets ?? []
   const handoffHoldMarkets = [
@@ -1152,21 +1292,12 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const zoomGenerationActive = zoomStatus === 'queued' || zoomStatus === 'running'
 
   const approvalHeadline = approvalEvaluation?.ai_review.headline || approvalEvaluation?.deterministic_overview.headline || ''
-  const supportedReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'supported') ?? []
-  const mixedReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'mixed') ?? []
-  const atRiskReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'at_risk') ?? []
   const orderedMarketReviews = approvalEvaluation
     ? [...approvalEvaluation.market_reviews].sort((left, right) => {
         const order = { at_risk: 0, mixed: 1, supported: 2, needs_data: 3 } as const
         return order[left.verdict] - order[right.verdict]
       })
     : []
-  const bySalienceDesc = (left: ApprovedPlanMarketReview, right: ApprovedPlanMarketReview) => {
-    const leftSalience = Number(left.brand_salience ?? Number.NEGATIVE_INFINITY)
-    const rightSalience = Number(right.brand_salience ?? Number.NEGATIVE_INFINITY)
-    if (rightSalience !== leftSalience) return rightSalience - leftSalience
-    return left.market.localeCompare(right.market)
-  }
   const modalMarketMeta = useMemo(() => {
     const reviewMap = new Map<string, { brandSalience: number | null; marketShareChange: number | null }>()
     ;(approvalEvaluation?.market_reviews ?? []).forEach((review) => {
@@ -1460,10 +1591,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     }, 60)
   }
 
-  function toggleQaCard(key: string) {
-    setExpandedQaCards((prev) => ({ ...prev, [key]: !prev[key] }))
-  }
-
   function setQaActionSelection(market: string, action: string) {
     setQaSaveMessage('')
     setQaActionSelections((prev) => ({ ...prev, [market]: action }))
@@ -1521,7 +1648,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
       resolved_intent: nextResolvedIntent,
       suggested_job_payload: suggestedJobPayload,
     })
-    setExpandedQaCards({})
     setQaSectionCollapsed(true)
     setResultsCollapsed(true)
     setQaSaveMessage('Saved QA action changes for scenario generation.')
@@ -2026,92 +2152,142 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                     {!qaSectionCollapsed && approvalEvaluation && (
                       <div className="mt-4 space-y-4">
 
-                        {/* Reasoning — what Trinity understood from the prompt */}
-                        <div className="rounded-2xl border border-[#e8ddd0] bg-[#faf6f0] px-4 py-5 space-y-3">
-                          <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8c7554]">What Trinity Understood</p>
-
-                          {/* Strategy tags row */}
-                          {(interp?.task_types ?? []).length > 0 && (
-                            <div className="flex flex-wrap gap-2">
-                              {(interp?.task_types ?? []).map((t, i) => (
-                                <span key={i} className="inline-flex items-center rounded-full bg-[#f0e8d8] border border-[#ddd0bb] px-2.5 py-0.5 text-[11px] font-semibold text-[#7b5c33] uppercase tracking-wide">
-                                  {t.replace(/_/g, ' ')}
-                                </span>
-                              ))}
-                              {interp?.action_direction && (
-                                <span className="inline-flex items-center rounded-full bg-slate-100 border border-slate-200 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600 uppercase tracking-wide">
-                                  {interp.action_direction}
-                                </span>
+                        {/* Reasoning — collapsible expander */}
+                        <div className="rounded-xl border border-[#e8ddd0] bg-[#faf6f0]">
+                          <button
+                            type="button"
+                            onClick={() => setUnderstandingCollapsed(prev => !prev)}
+                            className="flex w-full items-center justify-between px-4 py-3 text-left transition hover:bg-[#f5ede0] rounded-xl"
+                          >
+                            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 pr-3">
+                              <span className="shrink-0 text-xs font-semibold uppercase tracking-[0.14em] text-[#8c7554]">What Trinity Understood</span>
+                              {approvalHeadline && <span className="rounded-full bg-[#e8ddd0] px-2 py-0.5 text-[10px] font-semibold leading-5 text-[#7b5c33]">{approvalHeadline}</span>}
+                            </div>
+                            <span className="text-xs font-semibold text-[#8c7554] shrink-0">{understandingCollapsed ? 'Show ▼' : 'Hide ▲'}</span>
+                          </button>
+                          {!understandingCollapsed && (
+                            <div className="px-4 pb-5 space-y-3 border-t border-[#e8ddd0]">
+                              <div className="pt-3" />
+                              {(interp?.task_types ?? []).length > 0 && (
+                                <div className="flex flex-wrap gap-2">
+                                  {(interp?.task_types ?? []).map((t, i) => (
+                                    <span key={i} className="inline-flex items-center rounded-full bg-[#f0e8d8] border border-[#ddd0bb] px-2.5 py-0.5 text-[11px] font-semibold text-[#7b5c33] uppercase tracking-wide">
+                                      {t.replace(/_/g, ' ')}
+                                    </span>
+                                  ))}
+                                  {interp?.action_direction && (
+                                    <span className="inline-flex items-center rounded-full bg-slate-100 border border-slate-200 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600 uppercase tracking-wide">
+                                      {interp.action_direction}
+                                    </span>
+                                  )}
+                                  {interp?.entity && (
+                                    <span className="inline-flex items-center rounded-full bg-slate-100 border border-slate-200 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600 uppercase tracking-wide">
+                                      {interp.entity}
+                                    </span>
+                                  )}
+                                </div>
                               )}
-                              {interp?.entity && (
-                                <span className="inline-flex items-center rounded-full bg-slate-100 border border-slate-200 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600 uppercase tracking-wide">
-                                  {interp.entity}
-                                </span>
+                              {interp?.reasoning ? (
+                                <p className="text-sm leading-6 text-slate-700">{interp.reasoning}</p>
+                              ) : (
+                                <p className="text-sm leading-6 text-slate-700">{interp?.goal || prompt}</p>
+                              )}
+                              {(interp?.matched_markets ?? []).length > 0 && (
+                                <div>
+                                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8c7554] mb-1.5">Markets Identified</p>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {(interp?.matched_markets ?? []).map((m, i) => (
+                                      <span key={i} className="rounded-md bg-white border border-[#ddd0bb] px-2 py-0.5 text-xs text-slate-600">{m}</span>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              {(interp?.assumptions ?? []).length > 0 && (
+                                <div>
+                                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8c7554] mb-1.5">Assumptions Made</p>
+                                  <div className="space-y-1">
+                                    {(interp?.assumptions ?? []).map((a, i) => (
+                                      <p key={i} className="text-xs text-slate-500 leading-5">· {a}</p>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                              {/* Steps inside the same expander */}
+                              {hasInterpretationSteps && (
+                                <div className="border-t border-[#e8ddd0] pt-3">
+                                  <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8c7554] mb-2">
+                                    How Trinity Interpreted This <span className="ml-1 font-normal normal-case tracking-normal text-slate-400">{interpretationStepCount} steps · {finalMarkets.length} markets</span>
+                                  </p>
+                                  <div className="space-y-1.5">
+                                    <p className="text-[11px] font-medium text-slate-400">Click any step to inspect how the filter worked.</p>
+                                    {interp?.is_multi_segment ? (
+                                      <>
+                                        {(interp.segments ?? []).map((seg) => {
+                                          const sa = segmentAccent(seg.action_direction)
+                                          return (
+                                            <div key={seg.id} className="space-y-1">
+                                              <div className={`flex items-center gap-2 rounded-lg px-3 py-1.5 ${sa.bg}`}>
+                                                <span className={`h-2 w-2 shrink-0 rounded-full ${sa.dot}`} />
+                                                <span className={`text-xs font-bold uppercase tracking-wider ${sa.text}`}>{seg.label}</span>
+                                                <span className={`ml-auto rounded-full px-2 py-0.5 text-[10px] font-bold ${sa.badge}`}>{seg.matched_markets.length} markets → {seg.action_direction}</span>
+                                              </div>
+                                              {seg.steps.map((step, i) => {
+                                                const acc = stepAccent(step.step_type)
+                                                const outCount = step.matched_markets?.length ?? 0
+                                                const inCount = step.input_count ?? outCount
+                                                const excl = isExclusion(step.step_type)
+                                                const badgeText = excl ? `${outCount} remain` : inCount > 0 && outCount < inCount ? `${outCount} / ${inCount}` : `${outCount} match`
+                                                const stepKey = `${seg.id}:${step.id}`
+                                                return (
+                                                  <div key={step.id} className="ml-4">
+                                                    <button type="button" onClick={() => toggleStepDetails(stepKey)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition hover:brightness-[0.98] ${acc.bg}`}>
+                                                      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/70 text-[10px] font-bold text-slate-500">{i + 1}</span>
+                                                      <span className={`h-2 w-2 shrink-0 rounded-full ${acc.dot}`} />
+                                                      <span className={`flex-1 text-sm font-medium ${acc.text}`}>{stepLabel(step)}</span>
+                                                      <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold ${acc.badge}`}>{badgeText}</span>
+                                                      <span className="text-xs font-semibold text-slate-400">{expandedSteps[stepKey] ? '−' : '+'}</span>
+                                                    </button>
+                                                    {renderStepDetails(step, i, seg.steps, stepKey, result?.selection.markets ?? markets)}
+                                                  </div>
+                                                )
+                                              })}
+                                            </div>
+                                          )
+                                        })}
+                                      </>
+                                    ) : (
+                                      visibleSteps.map((step, i) => {
+                                        const acc = stepAccent(step.step_type)
+                                        const outCount = step.matched_markets?.length ?? 0
+                                        const inCount = step.input_count ?? outCount
+                                        const excl = isExclusion(step.step_type)
+                                        const badgeText = excl ? `${outCount} remain` : inCount > 0 && outCount < inCount ? `${outCount} / ${inCount}` : `${outCount} match`
+                                        const stepKey = step.id
+                                        return (
+                                          <div key={step.id}>
+                                            <button type="button" onClick={() => toggleStepDetails(stepKey)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition hover:brightness-[0.98] ${acc.bg}`}>
+                                              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/70 text-[10px] font-bold text-slate-500">{i + 1}</span>
+                                              <span className={`h-2 w-2 shrink-0 rounded-full ${acc.dot}`} />
+                                              <span className={`flex-1 text-sm font-medium ${acc.text}`}>{stepLabel(step)}</span>
+                                              <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold ${acc.badge}`}>{badgeText}</span>
+                                              <span className="text-xs font-semibold text-slate-400">{expandedSteps[stepKey] ? '−' : '+'}</span>
+                                            </button>
+                                            {renderStepDetails(step, i, visibleSteps, stepKey, result?.selection.markets ?? markets)}
+                                          </div>
+                                        )
+                                      })
+                                    )}
+                                  </div>
+                                </div>
                               )}
                             </div>
                           )}
-
-                          {/* Main reasoning explanation */}
-                          {interp?.reasoning ? (
-                            <p className="text-sm leading-6 text-slate-700">{interp.reasoning}</p>
-                          ) : (
-                            <p className="text-sm leading-6 text-slate-700">{interp?.goal || prompt}</p>
-                          )}
-
-                          {/* Matched markets */}
-                          {(interp?.matched_markets ?? []).length > 0 && (
-                            <div>
-                              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8c7554] mb-1.5">Markets Identified</p>
-                              <div className="flex flex-wrap gap-1.5">
-                                {(interp?.matched_markets ?? []).map((m, i) => (
-                                  <span key={i} className="rounded-md bg-white border border-[#ddd0bb] px-2 py-0.5 text-xs text-slate-600">{m}</span>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Assumptions */}
-                          {(interp?.assumptions ?? []).length > 0 && (
-                            <div>
-                              <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8c7554] mb-1.5">Assumptions Made</p>
-                              <div className="space-y-1">
-                                {(interp?.assumptions ?? []).map((a, i) => (
-                                  <p key={i} className="text-xs text-slate-500 leading-5">· {a}</p>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Approval headline */}
-                          {approvalHeadline && (
-                            <p className="text-xs font-semibold text-[#7b5c33] leading-5 border-t border-[#e8ddd0] pt-3">{approvalHeadline}</p>
-                          )}
-                        </div>
-
-                        <div className="grid gap-3 lg:grid-cols-3">
-                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-700">Supported</p>
-                            <p className="mt-2 text-3xl font-semibold text-emerald-800">{supportedReviews.length}</p>
-                            <p className="mt-1 text-xs text-emerald-700">Actions where the economics line up with the recommendation.</p>
-                          </div>
-                          <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-amber-700">Mixed</p>
-                            <p className="mt-2 text-3xl font-semibold text-amber-800">{mixedReviews.length}</p>
-                            <p className="mt-1 text-xs text-amber-700">Actions with both support and caution signals.</p>
-                          </div>
-                          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-rose-700">At Risk</p>
-                            <p className="mt-2 text-3xl font-semibold text-rose-800">{atRiskReviews.length}</p>
-                            <p className="mt-1 text-xs text-rose-700">Actions where responsiveness or salience conflicts with the recommendation.</p>
-                          </div>
                         </div>
 
                         <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
-                          <p className="text-xs font-bold uppercase tracking-[0.12em] text-slate-600">Market Signals</p>
+                          <p className="text-xs font-bold uppercase tracking-[0.12em] text-slate-600">Market Signals <span className="ml-1 font-normal normal-case tracking-normal text-slate-400">— sorted by brand salience</span></p>
                           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 max-h-[34rem] overflow-y-auto pr-1">
-                            {orderedMarketReviews.map((review) => {
-                              const hasSupport = review.supporting_points.length > 0
-                              const hasWarning = review.warning_points.length > 0
+                            {[...orderedMarketReviews].sort((a, b) => (b.brand_salience ?? 0) - (a.brand_salience ?? 0)).map((review) => {
                               const verdictColor = review.verdict === 'supported'
                                 ? 'border-emerald-200 bg-emerald-50'
                                 : review.verdict === 'at_risk'
@@ -2122,6 +2298,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                                 : review.verdict === 'at_risk'
                                   ? 'bg-rose-100 text-rose-700'
                                   : 'bg-amber-100 text-amber-700'
+                              const signalCopy = marketSignalCopy(review)
                               return (
                                 <div key={review.market} className={`rounded-2xl border px-4 py-3 ${verdictColor}`}>
                                   <div className="flex items-start justify-between gap-2">
@@ -2130,30 +2307,53 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                                       {review.verdict === 'at_risk' ? 'At risk' : review.verdict === 'supported' ? 'Supported' : 'Mixed'}
                                     </span>
                                   </div>
-                                  {hasSupport && (
+                                  <div className="mt-2 flex items-center gap-2">
+                                    <label className="shrink-0 text-[10px] font-bold uppercase tracking-[0.12em] text-slate-500">
+                                      Action
+                                    </label>
+                                    <select
+                                      value={qaActionSelections[review.market] ?? normalizeQaActionValue(review.action_direction)}
+                                      onChange={(event) => setQaActionSelection(review.market, event.target.value)}
+                                      className="min-w-0 flex-1 rounded-lg border border-white/80 bg-white/80 px-2 py-1 text-[11px] font-semibold text-slate-700 outline-none transition focus:border-[#9c7a4a] focus:ring-2 focus:ring-[#d7cbb7]"
+                                    >
+                                      <option value="increase">Increase</option>
+                                      <option value="slight_increase">Slight increase</option>
+                                      <option value="maintain">Maintain</option>
+                                      <option value="slight_decrease">Slight decrease</option>
+                                      <option value="decrease">Decrease</option>
+                                    </select>
+                                  </div>
+                                  <p className={`mt-2 text-[12px] font-medium leading-5 ${review.verdict === 'at_risk' ? 'text-rose-700' : review.verdict === 'mixed' ? 'text-amber-800' : 'text-emerald-800'}`}>
+                                    {signalCopy.summary}
+                                  </p>
+                                  {signalCopy.bullets.length > 0 && (
                                     <ul className="mt-2 space-y-1">
-                                      {review.supporting_points.map((pt, i) => (
-                                        <li key={i} className="flex gap-1.5 text-[11px] text-emerald-700">
-                                          <span className="mt-0.5 shrink-0 font-bold">✓</span>
-                                          <span>{pt}</span>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  )}
-                                  {hasWarning && (
-                                    <ul className="mt-2 space-y-1">
-                                      {review.warning_points.map((pt, i) => (
-                                        <li key={i} className="flex gap-1.5 text-[11px] text-rose-700">
-                                          <span className="mt-0.5 shrink-0 font-bold">!</span>
-                                          <span>{pt}</span>
+                                      {signalCopy.bullets.map((bullet, index) => (
+                                        <li
+                                          key={`${review.market}-${index}`}
+                                          className={`flex gap-1.5 text-[11px] leading-5 ${bullet.tone === 'watch' ? 'text-rose-700' : 'text-emerald-700'}`}
+                                        >
+                                          <span className="mt-0.5 shrink-0 font-bold">{bullet.tone === 'watch' ? '!' : '✓'}</span>
+                                          <span>{bullet.text}</span>
                                         </li>
                                       ))}
                                     </ul>
                                   )}
                                   <div className="mt-2.5 flex flex-wrap gap-1.5">
-                                    {review.responsiveness_label && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">Elasticity: {review.responsiveness_label}</span>}
-                                    {review.avg_cpr_band && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">CPR: {review.avg_cpr_band}</span>}
-                                    {review.brand_salience != null && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">Salience: {review.brand_salience_band ?? review.brand_salience}</span>}
+                                    {signalCopy.signals.map((signal) => (
+                                      <span
+                                        key={signal.label}
+                                        className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                                          signal.tone === 'good'
+                                            ? 'bg-emerald-100 text-emerald-700'
+                                            : signal.tone === 'watch'
+                                              ? 'bg-rose-100 text-rose-700'
+                                              : 'bg-white/70 text-slate-600'
+                                        }`}
+                                      >
+                                        {signal.label}: {signal.value}
+                                      </span>
+                                    ))}
                                   </div>
                                 </div>
                               )
@@ -2162,190 +2362,11 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                         </div>
 
 
-              {/* Section: Interpretation Steps + Scoring Grid — collapsed by default */}
-              <div className="px-5 py-3">
-              {/* Toggle */}
-              <button
-                type="button"
-                onClick={() => setStepsCollapsed(prev => !prev)}
-                className="flex w-full items-center justify-between rounded-xl border border-[#e8ddd0] bg-[#faf6f0] px-3 py-2.5 text-left transition hover:bg-[#f5ede0]"
-              >
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold uppercase tracking-[0.14em] text-[#8c7554]">How Trinity Interpreted This</span>
-                  <span className="rounded-full bg-[#e8ddd0] px-2 py-0.5 text-[10px] font-semibold text-[#7b5c33]">{steps.length} steps · {finalMarkets.length} markets</span>
-                </div>
-                <span className="text-xs font-semibold text-[#8c7554]">{stepsCollapsed ? 'Show ▼' : 'Hide ▲'}</span>
-              </button>
 
-              {!stepsCollapsed && (
-              <div className="mt-3 space-y-1.5">
-                <p className="text-[11px] font-medium text-slate-400">Click any step to inspect how the filter worked.</p>
-                {interp.is_multi_segment ? (
-                  <>
-                    {(interp.segments ?? []).map((seg) => {
-                      const sa = segmentAccent(seg.action_direction)
-                      return (
-                        <div key={seg.id} className="space-y-1">
-                          {/* Segment header */}
-                          <div className={`flex items-center gap-2 rounded-lg px-3 py-1.5 ${sa.bg}`}>
-                            <span className={`h-2 w-2 shrink-0 rounded-full ${sa.dot}`} />
-                            <span className={`text-xs font-bold uppercase tracking-wider ${sa.text}`}>{seg.label}</span>
-                            <span className={`ml-auto rounded-full px-2 py-0.5 text-[10px] font-bold ${sa.badge}`}>
-                              {seg.matched_markets.length} markets → {seg.action_direction}
-                            </span>
-                          </div>
-                          {/* Segment steps */}
-                          {seg.steps.map((step, i) => {
-                            const acc = stepAccent(step.step_type)
-                            const outCount = step.matched_markets?.length ?? 0
-                            const inCount = step.input_count ?? outCount
-                            const excl = isExclusion(step.step_type)
-                            const badgeText = excl ? `${outCount} remain` : inCount > 0 && outCount < inCount ? `${outCount} / ${inCount}` : `${outCount} match`
-                            const stepKey = `${seg.id}:${step.id}`
-                            return (
-                              <div key={step.id} className="ml-4">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleStepDetails(stepKey)}
-                                  className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition hover:brightness-[0.98] ${acc.bg}`}
-                                >
-                                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/70 text-[10px] font-bold text-slate-500">{i + 1}</span>
-                                  <span className={`h-2 w-2 shrink-0 rounded-full ${acc.dot}`} />
-                                  <span className={`flex-1 text-sm font-medium ${acc.text}`}>{stepLabel(step)}</span>
-                                  <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold ${acc.badge}`}>{badgeText}</span>
-                                  <span className="text-xs font-semibold text-slate-400">{expandedSteps[stepKey] ? '−' : '+'}</span>
-                                  <span className="text-xs text-slate-400">✓</span>
-                                </button>
-                                {renderStepDetails(step, i, seg.steps, stepKey, result?.selection.markets ?? markets)}
-                              </div>
-                            )
-                          })}
-                        </div>
-                      )
-                    })}
-                    {/* Exceptions strip */}
-                    {(interp.exceptions ?? []).length > 0 && (
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2 rounded-lg bg-violet-50 px-3 py-1.5">
-                          <span className="h-2 w-2 shrink-0 rounded-full bg-violet-400" />
-                          <span className="text-xs font-bold uppercase tracking-wider text-violet-700">Exceptions</span>
-                        </div>
-                        {(interp.exceptions ?? []).map((exc) => (
-                          <div key={exc.market} className="ml-4 flex items-center gap-3 rounded-xl bg-violet-50 px-3 py-2">
-                            <span className="flex-1 text-sm font-medium text-violet-700">{exc.market}</span>
-                            <span className="shrink-0 rounded-full bg-violet-100 px-2.5 py-0.5 text-xs font-semibold text-violet-700">
-                              → {exc.action_direction}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {conflictResolutions.length > 0 && (
-                      <div className="space-y-2 pt-1">
-                        <div className="rounded-2xl border border-amber-200 bg-amber-50/70 px-4 py-3">
-                          <div className="flex items-start justify-between gap-3">
-                            <div>
-                              <p className="text-xs font-bold uppercase tracking-[0.14em] text-amber-800">Resolved Overlaps</p>
-                              <p className="mt-1 text-sm text-amber-900">
-                                These markets matched conflicting paths. Trinity picked the stronger action using elasticity, CPR, and brand salience.
-                              </p>
-                            </div>
-                            <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-semibold text-amber-800">
-                              {conflictResolutions.length} market{conflictResolutions.length !== 1 ? 's' : ''}
-                            </span>
-                          </div>
-                          <div className="mt-3 space-y-2.5">
-                            {conflictResolutions.map((resolution) => {
-                              const chosenAccent = segmentAccent(resolution.chosen_action_direction)
-                              return (
-                                <div key={resolution.market} className="rounded-2xl border border-white/80 bg-white/80 px-4 py-3 shadow-sm">
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <p className="text-sm font-semibold text-slate-900">{resolution.market}</p>
-                                    <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${chosenAccent.badge}`}>
-                                      Final action: {formatActionLabel(resolution.chosen_action_direction)}
-                                    </span>
-                                  </div>
-                                  <p className="mt-2 text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Matched paths</p>
-                                  <div className="mt-2 flex flex-wrap gap-2">
-                                    {resolution.candidate_actions.map((candidate, index) => {
-                                      const candidateAccent = segmentAccent(candidate.action_direction)
-                                      const isChosen =
-                                        candidate.action_direction === resolution.chosen_action_direction
-                                        && candidate.source_label === resolution.chosen_source_label
-                                      return (
-                                        <span
-                                          key={`${resolution.market}-${candidate.source_label}-${candidate.action_direction}-${index}`}
-                                          className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${isChosen ? 'border-slate-300 bg-slate-50 text-slate-700' : 'border-slate-200 bg-white text-slate-600'}`}
-                                        >
-                                          <span className={`mr-1 inline-flex rounded-full px-2 py-0.5 ${candidateAccent.badge}`}>
-                                            {formatActionLabel(candidate.action_direction)}
-                                          </span>
-                                          {candidate.source_label}
-                                        </span>
-                                      )
-                                    })}
-                                  </div>
-                                  <p className="mt-3 text-sm leading-5 text-slate-700">{resolution.reason}</p>
-                                </div>
-                              )
-                            })}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Trinity's Plan — {steps.length} step{steps.length !== 1 ? 's' : ''}</p>
-                    {visibleSteps.map((step, i) => {
-                      const acc = stepAccent(step.step_type)
-                      const outCount = step.matched_markets?.length ?? 0
-                      const inCount = step.input_count ?? outCount
-                      const excl = isExclusion(step.step_type)
-                      const badgeText = excl
-                        ? `${outCount} remain`
-                        : inCount > 0 && outCount < inCount
-                          ? `${outCount} / ${inCount}`
-                          : `${outCount} match`
-                      const stepKey = step.id
-                      return (
-                        <div key={step.id}>
-                          <button
-                            type="button"
-                            onClick={() => toggleStepDetails(stepKey)}
-                            className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:brightness-[0.98] ${acc.bg}`}
-                          >
-                            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-white/70 text-[10px] font-bold text-slate-500">{i + 1}</span>
-                            <span className={`h-2 w-2 shrink-0 rounded-full ${acc.dot}`} />
-                            <span className={`flex-1 text-sm font-medium ${acc.text}`}>{stepLabel(step)}</span>
-                            <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-semibold ${acc.badge}`}>{badgeText}</span>
-                            <span className="text-xs font-semibold text-slate-400">{expandedSteps[stepKey] ? '−' : '+'}</span>
-                            <span className="text-xs text-slate-400">✓</span>
-                          </button>
-                          {renderStepDetails(step, i, visibleSteps, stepKey, result?.selection.markets ?? markets)}
-                        </div>
-                      )
-                    })}
-                  </>
-                )}
-              </div>
-              )}
 
-              {/* 5-Column Market Scoring Grid — collapsible */}
+              {/* 5-Column Market Scoring Grid */}
               {showScoringGrid && (
-                <div className="mt-4">
-                  <button
-                    type="button"
-                    onClick={() => setScoringGridCollapsed(prev => !prev)}
-                    className="flex w-full items-center justify-between rounded-xl border border-[#e8ddd0] bg-[#faf6f0] px-3 py-2 text-left transition hover:bg-[#f5ede0]"
-                  >
-                    <span className="text-xs font-semibold uppercase tracking-[0.14em] text-[#8c7554]">Market Scoring — {dispositions.length} markets</span>
-                    <span className="text-xs font-semibold text-[#8c7554]">{scoringGridCollapsed ? 'Show ▼' : 'Hide ▲'}</span>
-                  </button>
-                </div>
-              )}
-              {showScoringGrid && !scoringGridCollapsed && (
-                <div className="mt-2 space-y-2">
+                <div className="mt-4 space-y-2">
                   <div className="flex items-baseline justify-between">
                     <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">
                       Market Scoring — {dispositions.length} markets
@@ -2404,7 +2425,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   )}
                 </div>
               )}
-              </div>
 
                         <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4">
                           <div>
