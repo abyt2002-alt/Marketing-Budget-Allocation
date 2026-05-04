@@ -933,8 +933,8 @@ function App() {
   const [scenarioIntentPartial, setScenarioIntentPartial] = useState<ScenarioResolvedIntent | null>(null)
   const [scenarioIntentConfirmationRequired, setScenarioIntentConfirmationRequired] = useState(false)
   const [scenarioIntentNotes, setScenarioIntentNotes] = useState<string[]>([])
-  const [marketSignalRows, setMarketSignalRows] = useState<Array<{market:string,change_in_market_share:number|null,change_in_brand_equity:number|null,category_salience:number|null,brand_salience:number|null,responsiveness_label:string}>>([])
-  const [showMarketSignals, setShowMarketSignals] = useState(false)
+  const [marketSignalRows, setMarketSignalRows] = useState<Array<{market:string,market_share:number|null,change_in_market_share:number|null,change_in_brand_equity:number|null,category_salience:number|null,brand_salience:number|null,responsiveness_label:string}>>([])
+  const [showMarketSignals, setShowMarketSignals] = useState(true)
   const [scenarioJobId, setScenarioJobId] = useState('')
   const [scenarioStatus, setScenarioStatus] = useState<'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'expired'>('idle')
   const [scenarioProgress, setScenarioProgress] = useState(0)
@@ -1046,6 +1046,21 @@ function App() {
     return availableMarkets.filter((market) => market.toLowerCase().includes(term))
   }, [availableMarkets, marketSearch])
   const selectedMarketsKey = useMemo(() => [...selectedMarkets].sort().join('|'), [selectedMarkets])
+
+  useEffect(() => {
+    if (!selectedBrand || selectedMarkets.length === 0) return
+    const apiBase = (import.meta as any).env?.VITE_API_BASE_URL ?? ''
+    fetch(`${apiBase}/api/scenarios/market-signals`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selected_brand: selectedBrand, selected_markets: selectedMarkets }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.market_signal_rows)) setMarketSignalRows(data.market_signal_rows)
+      })
+      .catch(() => undefined)
+  }, [selectedBrand, selectedMarketsKey])
   const overridesKey = useMemo(() => JSON.stringify(marketOverrides), [marketOverrides])
   const sCurveStates = useMemo(() => availableMarkets, [availableMarkets])
   const aiModeMarkets = useMemo(() => {
@@ -2920,7 +2935,7 @@ function App() {
                       onClick={() => setShowMarketSignals(v => !v)}
                       className="text-[11px] font-semibold text-slate-500 underline underline-offset-2 hover:text-slate-800"
                     >
-                      {showMarketSignals ? '▲ Hide' : '▼ Show'} market signals ({marketSignalRows.length} markets)
+                      {showMarketSignals ? '▲ Hide' : '▼ Show'} market data Trinity uses ({marketSignalRows.length} markets)
                     </button>
                     {showMarketSignals && (
                       <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
@@ -2928,6 +2943,7 @@ function App() {
                           <thead>
                             <tr className="border-b border-slate-100 bg-slate-50">
                               <th className="px-3 py-2 text-left font-semibold text-slate-600">Market</th>
+                              <th className="px-3 py-2 text-right font-semibold text-slate-600">Mkt Share</th>
                               <th className="px-3 py-2 text-right font-semibold text-slate-600">Mkt Share Δ</th>
                               <th className="px-3 py-2 text-right font-semibold text-slate-600">Brand Equity Δ</th>
                               <th className="px-3 py-2 text-right font-semibold text-slate-600">Cat. Salience</th>
@@ -2939,6 +2955,9 @@ function App() {
                             {marketSignalRows.map((row) => (
                               <tr key={row.market} className="border-b border-slate-50 hover:bg-slate-50">
                                 <td className="px-3 py-1.5 font-medium text-slate-800">{row.market}</td>
+                                <td className="px-3 py-1.5 text-right text-slate-600">
+                                  {row.market_share != null ? `${(row.market_share * 100).toFixed(1)}%` : '—'}
+                                </td>
                                 <td className={`px-3 py-1.5 text-right font-semibold ${row.change_in_market_share != null && row.change_in_market_share < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
                                   {row.change_in_market_share != null ? `${row.change_in_market_share > 0 ? '+' : ''}${(row.change_in_market_share * 100).toFixed(1)}%` : '—'}
                                 </td>

@@ -2689,3 +2689,40 @@ def service_prepare_scenario_handoff(payload: ScenarioIntentHandoffRequest) -> d
         },
         "notes": list(guidance.get("notes", []) or []) + list(strategy_preview.get("notes", []) or []),
     }
+
+
+class MarketSignalsRequest(BaseModel):
+    selected_brand: str
+    selected_markets: list[str] = Field(default_factory=list)
+
+
+def service_get_market_signals(payload: MarketSignalsRequest) -> dict[str, Any]:
+    ctx = _load_optimization_context(
+        OptimizeAutoRequest(
+            selected_brand=payload.selected_brand,
+            selected_markets=payload.selected_markets,
+        )
+    )
+    market_guidance = dict(ctx.get("market_intelligence_guidance", {}) or {})
+    raw_rows = market_guidance.get("rows", [])
+    if not isinstance(raw_rows, list):
+        raw_rows = []
+    all_rows = _sanitize_market_rows(raw_rows)
+    selected_set = set(payload.selected_markets) if payload.selected_markets else None
+    market_rows = [r for r in all_rows if selected_set is None or r["market"] in selected_set]
+    return {
+        "status": "ok",
+        "market_signal_rows": [
+            {
+                "market": str(row.get("market", "")).strip(),
+                "market_share": row.get("market_share"),
+                "change_in_market_share": row.get("change_in_market_share"),
+                "change_in_brand_equity": row.get("change_in_brand_equity"),
+                "category_salience": row.get("category_salience"),
+                "brand_salience": row.get("brand_salience"),
+                "responsiveness_label": row.get("responsiveness_label", ""),
+            }
+            for row in market_rows
+            if str(row.get("market", "")).strip()
+        ],
+    }

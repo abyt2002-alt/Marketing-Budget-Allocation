@@ -413,6 +413,12 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [brand, setBrand] = useState('')
   const [markets, setMarkets] = useState<string[]>([])
   const [prompt, setPrompt] = useState('')
+  const [marketSignalRows, setMarketSignalRows] = useState<Array<{market:string,market_share:number|null,change_in_market_share:number|null,change_in_brand_equity:number|null,category_salience:number|null,brand_salience:number|null,responsiveness_label:string}>>([])
+  const [showMarketSignals, setShowMarketSignals] = useState(true)
+  const [mktSortCol, setMktSortCol] = useState<string>('market')
+  const [mktSortDir, setMktSortDir] = useState<'asc'|'desc'>('asc')
+  const [mktShareFilter, setMktShareFilter] = useState<'all'|'positive'|'negative'>('all')
+  const [mktEquityFilter, setMktEquityFilter] = useState<'all'|'positive'|'negative'>('all')
   const [setupCollapsed, setSetupCollapsed] = useState(false)
   const [budgetIncreasePct, setBudgetIncreasePct] = useState(5)
   const [scenarioRangeLowerPct, setScenarioRangeLowerPct] = useState(80)
@@ -509,6 +515,19 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     setMarkets(config.markets_by_brand[next] ?? [])
     setSetupCollapsed(false)
   }, [config])
+
+  const marketsKey = useMemo(() => [...markets].sort().join('|'), [markets])
+  useEffect(() => {
+    if (!brand || markets.length === 0) return
+    fetch(`${apiBaseUrl}/api/scenarios/market-signals`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selected_brand: brand, selected_markets: markets }),
+    })
+      .then((r) => r.json())
+      .then((data) => { if (Array.isArray(data.market_signal_rows)) setMarketSignalRows(data.market_signal_rows) })
+      .catch(() => undefined)
+  }, [brand, marketsKey, apiBaseUrl])
 
   useEffect(() => {
     try {
@@ -1844,35 +1863,138 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 </button>
               </div>
 
-              {/* Bottom row — Markets + Prompt */}
-              <div className="grid gap-0 xl:grid-cols-[minmax(280px,380px)_minmax(0,1fr)] divide-x divide-[#ede4d6]">
-                <div className="px-5 py-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Markets <span className="font-normal normal-case tracking-normal text-slate-400">({markets.length} selected)</span></p>
-                    <div className="flex gap-1.5">
-                      <button type="button" onClick={() => setMarkets(availableMarkets)}
-                        className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-0.5 text-[11px] font-semibold text-slate-500 hover:border-[#9c7a4a]">All</button>
-                      <button type="button" onClick={() => setMarkets([])}
-                        className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-0.5 text-[11px] font-semibold text-slate-500 hover:border-[#9c7a4a]">None</button>
+              {/* Bottom row — toggling between Markets panel and Data+Prompt */}
+              <div className="flex divide-x divide-[#ede4d6]">
+
+                {/* Left: Markets (hidden when data panel is open) */}
+                {!showMarketSignals && (
+                  <div className="w-[280px] shrink-0 px-5 py-4">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Markets <span className="font-normal normal-case tracking-normal text-slate-400">({markets.length} selected)</span></p>
+                      <div className="flex gap-1.5">
+                        <button type="button" onClick={() => setMarkets(availableMarkets)} className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-0.5 text-[11px] font-semibold text-slate-500 hover:border-[#9c7a4a]">All</button>
+                        <button type="button" onClick={() => setMarkets([])} className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-0.5 text-[11px] font-semibold text-slate-500 hover:border-[#9c7a4a]">None</button>
+                      </div>
+                    </div>
+                    <div className="mt-3 max-h-64 space-y-1 overflow-y-auto">
+                      {availableMarkets.map((m) => (
+                        <label key={`setup-${m}`} className={`flex cursor-pointer items-center justify-between rounded-xl border px-3 py-2 text-sm transition ${markets.includes(m) ? 'border-[#c9a87a] bg-[#f9f2e8] text-[#7a5b31]' : 'border-transparent text-slate-600 hover:bg-slate-50'}`}>
+                          <span>{m}</span>
+                          <input type="checkbox" checked={markets.includes(m)} onChange={() => toggleMarket(m)} className="h-3.5 w-3.5 rounded border-slate-300 text-[#7b5c33]" />
+                        </label>
+                      ))}
                     </div>
                   </div>
-                  <div className="mt-3 max-h-52 space-y-1 overflow-y-auto">
-                    {availableMarkets.map((m) => (
-                      <label key={`setup-${m}`} className={`flex cursor-pointer items-center justify-between rounded-xl border px-3 py-2 text-sm transition ${markets.includes(m) ? 'border-[#c9a87a] bg-[#f9f2e8] text-[#7a5b31]' : 'border-transparent text-slate-600 hover:bg-slate-50'}`}>
-                        <span>{m}</span>
-                        <input type="checkbox" checked={markets.includes(m)} onChange={() => toggleMarket(m)} className="h-3.5 w-3.5 rounded border-slate-300 text-[#7b5c33]" />
-                      </label>
-                    ))}
+                )}
+
+                {/* Data reference panel (50% when open) */}
+                {marketSignalRows.length > 0 && showMarketSignals && (() => {
+                  const cols: {key: string, label: string}[] = [
+                    {key:'market', label:'Market'},
+                    {key:'market_share', label:'Market Share'},
+                    {key:'change_in_market_share', label:'Change in Mkt Share'},
+                    {key:'change_in_brand_equity', label:'Change in Brand Equity'},
+                    {key:'category_salience', label:'Category Salience'},
+                    {key:'brand_salience', label:'Brand Salience'},
+                  ]
+                  const toggleSort = (col: string) => {
+                    if (mktSortCol === col) setMktSortDir(d => d === 'asc' ? 'desc' : 'asc')
+                    else { setMktSortCol(col); setMktSortDir('asc') }
+                  }
+                  const filtered = marketSignalRows.filter(r => {
+                    if (mktShareFilter === 'positive' && (r.change_in_market_share ?? 0) < 0) return false
+                    if (mktShareFilter === 'negative' && (r.change_in_market_share ?? 0) >= 0) return false
+                    if (mktEquityFilter === 'positive' && (r.change_in_brand_equity ?? 0) < 0) return false
+                    if (mktEquityFilter === 'negative' && (r.change_in_brand_equity ?? 0) >= 0) return false
+                    return true
+                  })
+                  const sorted = [...filtered].sort((a, b) => {
+                    const av = (a as any)[mktSortCol] ?? ''
+                    const bv = (b as any)[mktSortCol] ?? ''
+                    const cmp = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv))
+                    return mktSortDir === 'asc' ? cmp : -cmp
+                  })
+                  const filterBtn = (active: 'all'|'positive'|'negative', current: 'all'|'positive'|'negative', set: (v: 'all'|'positive'|'negative') => void, label: string, color?: string) =>
+                    <button type="button" onClick={() => set(active)}
+                      className={`rounded-full px-2.5 py-1 text-[10px] font-semibold transition-all ${current === active
+                        ? color === 'green' ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-300'
+                          : color === 'red' ? 'bg-red-100 text-red-700 ring-1 ring-red-300'
+                          : 'bg-[#9c8060] text-white'
+                        : 'bg-white border border-[#e0d5c5] text-slate-500 hover:border-[#9c8060] hover:text-[#9c8060]'}`}>{label}</button>
+                  return (
+                    <div className="flex w-1/2 shrink-0 flex-col px-4 py-4">
+                      <div className="flex items-center justify-between gap-2 mb-3">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Market Data <span className="font-normal normal-case tracking-normal text-slate-400">— reference while writing</span></p>
+                        <button type="button" onClick={() => setShowMarketSignals(false)} className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-0.5 text-[10px] font-semibold text-slate-500 hover:border-[#9c7a4a]">✕ Hide</button>
+                      </div>
+                      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl bg-[#faf7f2] px-3 py-2 border border-[#ede4d6]">
+                        <span className="text-[10px] font-semibold text-slate-400">Mkt Share:</span>
+                        {filterBtn('all', mktShareFilter, setMktShareFilter, 'All')}
+                        {filterBtn('positive', mktShareFilter, setMktShareFilter, '▲ Gaining', 'green')}
+                        {filterBtn('negative', mktShareFilter, setMktShareFilter, '▼ Losing', 'red')}
+                        <span className="ml-1 text-[10px] font-semibold text-slate-400">Brand Equity:</span>
+                        {filterBtn('all', mktEquityFilter, setMktEquityFilter, 'All')}
+                        {filterBtn('positive', mktEquityFilter, setMktEquityFilter, '▲ Improving', 'green')}
+                        {filterBtn('negative', mktEquityFilter, setMktEquityFilter, '▼ Declining', 'red')}
+                      </div>
+                      <div className="flex-1 overflow-y-auto rounded-xl border border-[#ede4d6]" style={{maxHeight: '220px'}}>
+                        <table className="w-full text-[11px]">
+                          <thead className="sticky top-0 z-10 bg-[#f3ede3]">
+                            <tr className="border-b-2 border-[#e0d5c5]">
+                              {cols.map(c => (
+                                <th key={c.key} onClick={() => toggleSort(c.key)}
+                                  className={`group cursor-pointer select-none px-3 py-2.5 font-semibold transition-colors
+                                    ${mktSortCol === c.key ? 'bg-[#ede4d6] text-[#6f522d]' : 'text-[#9c8060] hover:bg-[#ede4d6]/60 hover:text-[#6f522d]'}
+                                    ${c.key === 'market' ? 'text-left' : 'text-right'}`}>
+                                  <span className="flex items-center gap-1 ${c.key !== 'market' ? 'justify-end' : ''}">
+                                    {c.label}
+                                    <span className={`text-[9px] ${mktSortCol === c.key ? 'opacity-100' : 'opacity-30 group-hover:opacity-70'}`}>
+                                      {mktSortCol === c.key ? (mktSortDir === 'asc' ? '▲' : '▼') : '⇅'}
+                                    </span>
+                                  </span>
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {sorted.map((row) => (
+                              <tr key={row.market} className="border-b border-[#ede4d6]/60 hover:bg-[#f0e8db]">
+                                <td className="px-3 py-1.5 font-medium text-slate-700 whitespace-nowrap">{row.market}</td>
+                                <td className="px-3 py-1.5 text-right text-slate-600">{row.market_share != null ? `${row.market_share.toFixed(1)}%` : '—'}</td>
+                                <td className={`px-3 py-1.5 text-right font-semibold ${(row.change_in_market_share ?? 0) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                                  {row.change_in_market_share != null ? `${row.change_in_market_share > 0 ? '+' : ''}${row.change_in_market_share.toFixed(1)}%` : '—'}
+                                </td>
+                                <td className={`px-3 py-1.5 text-right font-semibold ${(row.change_in_brand_equity ?? 0) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                                  {row.change_in_brand_equity != null ? `${row.change_in_brand_equity > 0 ? '+' : ''}${row.change_in_brand_equity.toFixed(1)}%` : '—'}
+                                </td>
+                                <td className="px-3 py-1.5 text-right text-slate-600">{row.category_salience != null ? `${row.category_salience.toFixed(1)}%` : '—'}</td>
+                                <td className="px-3 py-1.5 text-right text-slate-600">{row.brand_salience != null ? `${row.brand_salience.toFixed(1)}%` : '—'}</td>
+                              </tr>
+                            ))}
+                            {sorted.length === 0 && (
+                              <tr><td colSpan={6} className="px-3 py-4 text-center text-slate-400">No markets match the selected filters</td></tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )
+                })()}
+
+                {/* Prompt (50% when data open, full remaining when data hidden) */}
+                <div className="flex flex-1 flex-col px-5 py-4">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Prompt</p>
+                    {marketSignalRows.length > 0 && !showMarketSignals && (
+                      <button type="button" onClick={() => setShowMarketSignals(true)} className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-0.5 text-[10px] font-semibold text-[#9c8060] hover:border-[#9c7a4a]">↗ Show market data</button>
+                    )}
                   </div>
-                </div>
-                <div className="flex flex-col px-5 py-4">
-                  <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Prompt</p>
                   <textarea
                     rows={6}
                     value={prompt}
                     onChange={(e) => setPrompt(e.target.value)}
                     placeholder="e.g. Increase media where I am losing market share and brand salience is below category salience…"
-                    className="mt-2 flex-1 min-h-[160px] w-full resize-none rounded-xl border border-[#d7cbb7] bg-white px-4 py-3 text-sm leading-6 text-slate-700 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
+                    className="flex-1 min-h-[200px] w-full resize-none rounded-xl border border-[#d7cbb7] bg-white px-4 py-3 text-sm leading-6 text-slate-700 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
                   />
                   <div className="mt-2.5 flex flex-wrap gap-1.5">
                     {['Loss recovery', 'Salience based', 'Multi-condition'].map((tag) => (
