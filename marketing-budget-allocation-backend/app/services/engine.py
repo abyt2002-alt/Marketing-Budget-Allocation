@@ -871,6 +871,13 @@ def _build_auto_config() -> dict:
         }
     brands = sorted(bm.keys())
     default_brand = brands[0] if brands else ""
+    default_baseline_budget: float | None = None
+    try:
+        model_df = _read_model_data(files["model_data"])
+        baseline_budgets = _compute_brand_baseline_budgets(model_df, brands)
+        default_baseline_budget = baseline_budgets.get(default_brand)
+    except Exception:
+        default_baseline_budget = None
     out = {
         "status": "ok",
         "files": {
@@ -883,6 +890,7 @@ def _build_auto_config() -> dict:
         "markets_by_brand": bm,
         "default_brand": default_brand,
         "default_markets": bm.get(default_brand, []),
+        "default_baseline_budget": default_baseline_budget,
     }
     _AUTO_CONFIG_CACHE = out
     _AUTO_CONFIG_SIGNATURE = sig
@@ -8790,7 +8798,19 @@ def service_auto_config() -> dict:
     out = _build_auto_config()
     # Fire-and-forget warmup so first-run insights become fast without blocking auto-config response.
     trigger_insights_cache_warmup()
-    return out
+    # Attach last known target budget from most recently completed scenario job (if any).
+    last_budget: float | None = None
+    with _SCENARIO_JOBS_LOCK:
+        completed = [j for j in _SCENARIO_JOBS.values() if j.get("status") == "completed" and j.get("result")]
+    if completed:
+        latest = max(completed, key=lambda j: j.get("updated_at", 0))
+        try:
+            last_budget = float(latest["result"]["summary"]["target_budget"])
+        except (KeyError, TypeError, ValueError):
+            last_budget = None
+    if last_budget is None:
+        last_budget = out.get("default_baseline_budget")
+    return {**out, "last_known_budget": last_budget}
 
 
 def service_insights_cache_status() -> dict[str, Any]:

@@ -7,6 +7,7 @@ type AutoConfigResponse = {
   markets_by_brand: Record<string, string[]>
   default_brand: string
   default_markets: string[]
+  last_known_budget?: number | null
 }
 
 type DebugPlanStep = {
@@ -1875,6 +1876,17 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm font-semibold text-[#8c7554]">%</span>
                     </div>
                   </div>
+                  {(() => {
+                    const tb = scenarioResults?.summary.target_budget
+                      ?? scenarioHandoff?.budget_context.target_budget
+                      ?? (result?.selection?.baseline_budget ? result.selection.baseline_budget * (1 + budgetIncreasePct / 100) : null)
+                      ?? config?.last_known_budget ?? null
+                    return (
+                      <p className="mt-1.5 text-[11px] text-slate-400">
+                        {tb ? `${formatBudgetValue(tb * (scenarioRangeLowerPct / 100))} – ${formatBudgetValue(tb * (scenarioRangeUpperPct / 100))}` : '—'}
+                      </p>
+                    )
+                  })()}
                 </div>
 
                 {/* Run button */}

@@ -47,6 +47,7 @@ type AutoConfigResponse = {
   markets_by_brand: Record<string, string[]>
   default_brand: string
   default_markets: string[]
+  last_known_budget?: number | null
 }
 
 type AllocationRow = {
