@@ -1130,7 +1130,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
 
 
   const interp = result?.normalized_interpretation ?? null
-  const hitl = result?.hitl ?? null
   const steps = interp?.steps ?? []
   const visibleSteps = steps.slice(0, visibleCount)
   const allRevealed = phase === 'done'
