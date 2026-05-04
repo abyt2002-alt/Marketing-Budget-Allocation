@@ -8314,7 +8314,7 @@ def _paginate_scenario_results(
             items = [s for s in items if _util_pct(s) >= float(min_budget_utilized_pct)]
         if max_budget_utilized_pct is not None:
             items = [s for s in items if _util_pct(s) <= float(max_budget_utilized_pct)]
-    def _apply_reach_share_filter(
+    def _apply_market_spend_filter(
         source_items: list[dict[str, Any]],
         market: str | None,
         direction_raw: str | None,
@@ -8332,19 +8332,19 @@ def _paginate_scenario_results(
         direction = str(direction_raw or "").strip().lower()
         min_delta = abs(float(_finite(min_delta_raw, 0.0)))
 
-        def _reach_share_delta_pp(s: dict[str, Any], market_key: str) -> float | None:
+        def _market_spend_delta(s: dict[str, Any], market_key: str) -> float | None:
             for row in s.get("markets", []) or []:
                 if str(row.get("market", "")).strip().lower() != market_key:
                     continue
-                old_share = float(_finite(row.get("fy25_reach_share_pct"), np.nan))
-                new_share = float(_finite(row.get("new_reach_share_pct"), np.nan))
-                if np.isfinite(old_share) and np.isfinite(new_share):
-                    return new_share - old_share
+                old_spend = float(_finite(row.get("old_total_spend"), np.nan))
+                new_spend = float(_finite(row.get("new_total_spend"), np.nan))
+                if np.isfinite(old_spend) and np.isfinite(new_spend):
+                    return new_spend - old_spend
                 return None
             return None
 
         def _matches(s: dict[str, Any], market_key: str) -> bool:
-            delta = _reach_share_delta_pp(s, market_key)
+            delta = _market_spend_delta(s, market_key)
             if direction in {"higher", "increase", "inc", "up"}:
                 return delta is not None and delta >= min_delta
             if direction in {"lower", "decrease", "dec", "down"}:
@@ -8353,8 +8353,8 @@ def _paginate_scenario_results(
 
         return [s for s in source_items if all(_matches(s, market_key) for market_key in market_keys)]
 
-    items = _apply_reach_share_filter(items, reach_share_market, reach_share_direction, min_reach_share_delta_pp)
-    items = _apply_reach_share_filter(items, reach_share_market_2, reach_share_direction_2, min_reach_share_delta_pp_2)
+    items = _apply_market_spend_filter(items, reach_share_market, reach_share_direction, min_reach_share_delta_pp)
+    items = _apply_market_spend_filter(items, reach_share_market_2, reach_share_direction_2, min_reach_share_delta_pp_2)
 
     reverse = sort_dir == "desc"
     if sort_key == "scenario_id":

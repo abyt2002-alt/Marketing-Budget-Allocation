@@ -1036,7 +1036,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   ) {
     const activeCount = filters.filter(f => f.markets.length > 0).length
     const directionLabel = (d: ScenarioReachFilter['direction']) =>
-      d === 'higher' ? 'Gained more share' : d === 'lower' ? 'Lost share' : 'Held share'
+      d === 'higher' ? 'Spend increased' : d === 'lower' ? 'Spend decreased' : 'Spend changed'
     const directionColor = (d: ScenarioReachFilter['direction']) =>
       d === 'higher' ? 'text-emerald-700 bg-emerald-50 border-emerald-200'
       : d === 'lower' ? 'text-rose-700 bg-rose-50 border-rose-200'
@@ -1050,7 +1050,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
           className="flex w-full items-center justify-between px-4 py-3 text-left"
         >
           <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-600">Market Change Control</span>
+            <span className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-600">Market Spend Control</span>
             {activeCount > 0 && (
               <span className="rounded-full bg-[#f4ece0] px-2 py-0.5 text-[10px] font-semibold text-[#7b5c33]">
                 {activeCount} condition{activeCount !== 1 ? 's' : ''} active
@@ -1062,7 +1062,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
 
         {marketControlOpen && (
           <div className="border-t border-slate-100 px-4 pb-4 pt-3">
-            <p className="mb-3 text-xs text-slate-500">Filter scenarios to only show ones where selected markets moved in a specific direction vs last year.</p>
+            <p className="mb-3 text-xs text-slate-500">Filter scenarios to only show ones where selected markets spend increased or decreased vs last year.</p>
             <div className="grid gap-3 sm:grid-cols-2">
               {filters.map((filter, index) => {
                 const otherFilter = filters[index === 0 ? 1 : 0]
@@ -2710,7 +2710,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                             <div key={`reach-filter-${index}`} className="relative rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 lg:col-span-6">
                               <div className="flex items-center justify-between gap-2">
                                 <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
-                                  Reach Share Filter {index + 1}
+                                  Spend Filter {index + 1}
                                 </label>
                                 {filter.markets.length ? (
                                   <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-600">
@@ -3038,7 +3038,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       <div key={`reach-filter-${index}`} className="relative rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 lg:col-span-6">
                         <div className="flex items-center justify-between gap-2">
                           <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
-                            Reach Share Filter {index + 1}
+                            Spend Filter {index + 1}
                           </label>
                           {filter.markets.length ? (
                             <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-600">
@@ -3506,7 +3506,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                         return (
                           <div key={`zoom-reach-filter-${index}`} className="relative rounded-2xl border border-slate-200 bg-slate-50 px-3 py-3 lg:col-span-6">
                             <div className="flex items-center justify-between gap-2">
-                              <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Reach Share Filter {index + 1}</label>
+                              <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">Spend Filter {index + 1}</label>
                               {filter.markets.length ? (
                                 <span className="rounded-full bg-white px-2.5 py-1 text-[10px] font-semibold text-slate-600">{filter.markets.length} selected</span>
                               ) : null}
@@ -3555,8 +3555,8 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                               disabled={!filter.markets.length}
                               className="mt-3 w-full rounded-2xl border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm disabled:bg-slate-100 disabled:text-slate-400"
                             >
-                              <option value="higher">Higher than last year</option>
-                              <option value="lower">Lower than last year</option>
+                              <option value="higher">Spend higher than last year</option>
+                              <option value="lower">Spend lower than last year</option>
                             </select>
                           </div>
                         )
