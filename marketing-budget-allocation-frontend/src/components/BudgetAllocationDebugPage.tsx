@@ -4079,7 +4079,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 <>
                   <line x1={minX.toFixed(1)} x2={minX.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1.5" strokeDasharray="4 2" opacity="0.7" />
                   <text x={minX} y={T + ph + 12} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.9">Min</text>
-                  <text x={minX} y={T + ph + 21} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.7">{fmtX(Number(minReach))}</text>
                 </>
               )}
               {/* Max line */}
@@ -4087,7 +4086,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 <>
                   <line x1={maxX.toFixed(1)} x2={maxX.toFixed(1)} y1={T} y2={T + ph} stroke={curveColor} strokeWidth="1.5" strokeDasharray="4 2" opacity="0.7" />
                   <text x={maxX} y={T + ph + 12} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.9">Max</text>
-                  <text x={maxX} y={T + ph + 21} textAnchor="middle" fontSize="8" fill={curveColor} opacity="0.7">{fmtX(Number(maxReach))}</text>
                 </>
               )}
               {/* Baseline dot */}
@@ -4099,8 +4097,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 <>
                   <line x1={nx.toFixed(1)} x2={nx.toFixed(1)} y1={T} y2={T + ph} stroke="#10b981" strokeWidth="1.5" strokeDasharray="4 2" opacity="0.8" />
                   <circle cx={nx.toFixed(1)} cy={ny.toFixed(1)} r="5" fill="#10b981" stroke="white" strokeWidth="1.5" />
-                  <text x={nx} y={T + ph + 12} textAnchor="middle" fontSize="8" fontWeight="bold" fill="#10b981">New</text>
-                  <text x={nx} y={T + ph + 21} textAnchor="middle" fontSize="8" fill="#10b981" opacity="0.8">{fmtX(newReach)}</text>
+                  <text x={nx} y={Math.max(T + 12, ny - 10)} textAnchor="middle" fontSize="8" fontWeight="bold" fill="#10b981">New</text>
                 </>
               )}
               {/* Y axis ticks */}
@@ -4110,7 +4107,10 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 </text>
               ))}
               {/* X axis ticks */}
-              {xTicks.map((x, i) => (
+              {xTicks.filter((x) => {
+                const px = mx(x)
+                return [minX, maxX, nx].every((markerX) => markerX == null || Math.abs(px - Number(markerX)) > 26)
+              }).map((x, i) => (
                 <text key={i} x={mx(x)} y={H - 30} textAnchor="middle" fontSize="9" fill="#94a3b8">{fmtX(x)}</text>
               ))}
               <text x={W / 2} y={H - 18} textAnchor="middle" fontSize="9" fill="#94a3b8">{modalSCurveChannel === 'tv' ? 'TV reach input' : 'Digital reach input'}</text>
