@@ -1167,12 +1167,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     if (rightSalience !== leftSalience) return rightSalience - leftSalience
     return left.market.localeCompare(right.market)
   }
-  const supportPlanReviews = orderedMarketReviews.filter(
-    (review) => review.verdict === 'supported' || review.supporting_points.length > 0,
-  ).sort(bySalienceDesc)
-  const needsReviewPlanReviews = orderedMarketReviews.filter(
-    (review) => review.verdict === 'mixed' || review.verdict === 'at_risk' || review.warning_points.length > 0,
-  ).sort(bySalienceDesc)
   const modalMarketMeta = useMemo(() => {
     const reviewMap = new Map<string, { brandSalience: number | null; marketShareChange: number | null }>()
     ;(approvalEvaluation?.market_reviews ?? []).forEach((review) => {
@@ -1533,122 +1527,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     setQaSaveMessage('Saved QA action changes for scenario generation.')
   }
 
-  function renderApprovalReasonBlock(
-    review: ApprovedPlanMarketReview,
-    tone: 'support' | 'review',
-  ) {
-    const cardKey = `${tone}-${review.market}`
-    const isExpanded = Boolean(expandedQaCards[cardKey])
-    const isActionExpanded = Boolean(qaActionExpanded[cardKey])
-    const selectedAction = qaActionSelections[review.market] ?? review.action_direction
-    const actionChanged = qaActionSelections[review.market] != null && qaActionSelections[review.market] !== review.action_direction
-    const actionOptions = ['increase', 'slight_increase', 'maintain', 'slight_decrease', 'decrease']
-    const reasonPoints = tone === 'support'
-      ? (review.supporting_points.length ? review.supporting_points : [review.summary])
-      : (review.warning_points.length ? review.warning_points : [review.summary])
-    const visiblePoints = reasonPoints.slice(0, 3)
-    const extraPoints = reasonPoints.slice(3)
-    const toneClasses = tone === 'support'
-      ? {
-          card: 'border-emerald-200 bg-white/80',
-          text: 'text-emerald-900',
-          badge: 'bg-emerald-100 text-emerald-700',
-        }
-      : {
-          card: 'border-rose-200 bg-white/80',
-          text: 'text-rose-900',
-          badge: 'bg-rose-100 text-rose-700',
-        }
-
-    return (
-      <div key={cardKey} className={`rounded-2xl border px-4 py-3 ${toneClasses.card}`}>
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-sm font-semibold text-slate-900">{review.market}</p>
-            <p className="mt-0.5 text-xs text-slate-500">{formatActionLabel(selectedAction)}</p>
-          </div>
-          <span className={`rounded-full px-2.5 py-1 text-[11px] font-semibold ${toneClasses.badge}`}>
-            {review.verdict === 'at_risk' ? 'At risk' : review.verdict === 'supported' ? 'Supported' : review.verdict === 'mixed' ? 'Mixed' : 'Needs data'}
-          </span>
-        </div>
-        <div className="mt-2">
-          <button
-            type="button"
-            onClick={() => setQaActionExpanded(prev => ({ ...prev, [cardKey]: !prev[cardKey] }))}
-            className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
-              actionChanged
-                ? 'border-[#9c7a4a] bg-[#f4ece0] text-[#7b5c33]'
-                : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
-            }`}
-          >
-            {actionChanged ? `✓ ${formatActionLabel(selectedAction)}` : 'Change Action'}
-          </button>
-          {isActionExpanded && (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {actionOptions.map((action) => {
-                const isSelected = selectedAction === action
-                return (
-                  <button
-                    key={`${review.market}-${action}`}
-                    type="button"
-                    onClick={() => {
-                      setQaActionSelection(review.market, action)
-                      setQaActionExpanded(prev => ({ ...prev, [cardKey]: false }))
-                    }}
-                    className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
-                      isSelected
-                        ? 'border-[#9c7a4a] bg-[#f4ece0] text-[#7b5c33]'
-                        : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
-                    }`}
-                  >
-                    {formatActionLabel(action)}
-                  </button>
-                )
-              })}
-            </div>
-          )}
-        </div>
-        <ul className={`mt-2 list-disc space-y-1 pl-5 text-sm leading-5 ${toneClasses.text}`}>
-          {visiblePoints.map((point, index) => (
-            <li key={`${review.market}-${tone}-summary-${index}`}>{point}</li>
-          ))}
-        </ul>
-        {extraPoints.length > 0 && (
-        <div className="mt-2">
-          <button
-            type="button"
-            onClick={() => toggleQaCard(cardKey)}
-            className="rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold text-slate-600 transition hover:border-slate-300"
-          >
-            {isExpanded ? 'Hide details' : 'Open details'}
-          </button>
-        </div>
-        )}
-        <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-700">
-          <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">
-            <strong>Elasticity:</strong> {review.responsiveness_label} ({formatMetric(review.overall_media_elasticity)})
-          </span>
-          <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">
-            <strong>CPR:</strong> {review.avg_cpr_band ?? 'unknown'} ({formatMetric(review.avg_cpr)})
-          </span>
-          <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1">
-            <strong>Salience:</strong> {review.brand_salience_band ?? 'unknown'} ({formatMetric(review.brand_salience, 1)})
-          </span>
-        </div>
-        {isExpanded && (
-          <div className="mt-2">
-            <div className={`max-h-48 overflow-y-auto px-1 py-1 text-sm leading-5 ${toneClasses.text}`}>
-              <ul className="list-disc space-y-1 pl-5">
-                {extraPoints.map((point, index) => (
-                  <li key={`${review.market}-${tone}-${index}`}>{point}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        )}
-      </div>
-    )
-  }
 
   return (
     <div className="w-full space-y-4">
@@ -2273,7 +2151,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                                     </ul>
                                   )}
                                   <div className="mt-2.5 flex flex-wrap gap-1.5">
-                                    {review.avg_elasticity_band && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">Elasticity: {review.avg_elasticity_band}</span>}
+                                    {review.responsiveness_label && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">Elasticity: {review.responsiveness_label}</span>}
                                     {review.avg_cpr_band && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">CPR: {review.avg_cpr_band}</span>}
                                     {review.brand_salience != null && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">Salience: {review.brand_salience_band ?? review.brand_salience}</span>}
                                   </div>
