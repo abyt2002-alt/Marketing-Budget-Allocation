@@ -1450,6 +1450,15 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     }).format(value)
   }
 
+  function formatCompactCountValue(value: number | null | undefined) {
+    if (value == null || !Number.isFinite(value)) return 'n/a'
+    return new Intl.NumberFormat('en', {
+      notation: 'compact',
+      compactDisplay: 'short',
+      maximumFractionDigits: Math.abs(value) >= 1_000 ? 1 : 0,
+    }).format(value)
+  }
+
   function escapeCsvValue(value: string | number | null | undefined) {
     const text = value == null ? '' : String(value)
     const escaped = text.replace(/"/g, '""')
@@ -4120,6 +4129,10 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
         const oldDigSpend = (Number(r.fy25_digital_reach ?? 0)) * (Number(r.digital_cpr ?? 0))
         const newTvSpend = Number(r.new_total_tv_spend ?? 0)
         const newDigSpend = Number(r.new_total_digital_spend ?? 0)
+        const oldTvReach = Number(r.fy25_tv_reach ?? 0)
+        const oldDigReach = Number(r.fy25_digital_reach ?? 0)
+        const newTvReachValue = Number(r.new_annual_tv_reach ?? 0) || (newTvSpend / Math.max(1e-9, Number(r.tv_cpr ?? 1)))
+        const newDigReachValue = Number(r.new_annual_digital_reach ?? 0) || (newDigSpend / Math.max(1e-9, Number(r.digital_cpr ?? 1)))
         const oldTotalForShare = oldTvSpend + oldDigSpend
         const newTotalForShare = newTvSpend + newDigSpend
         const oldTvSharePct = oldTotalForShare > 0 ? (oldTvSpend / oldTotalForShare) * 100 : 0
@@ -4206,12 +4219,14 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                         <div className="flex-1 text-center">
                           <p className="text-[10px] uppercase tracking-wide text-slate-400">Before spend</p>
                           <p className="text-base font-bold text-slate-700">{formatCompactBudgetValue(oldTvSpend)}</p>
+                          <p className="text-[10px] font-semibold text-blue-600">Reach {formatCompactCountValue(oldTvReach)}</p>
                           <p className="text-[10px] text-slate-500">Spend split {formatMetric(oldTvSharePct, 1)}%</p>
                         </div>
                         <p className="mb-1 text-slate-300">→</p>
                         <div className="flex-1 text-center">
                           <p className="text-[10px] uppercase tracking-wide text-slate-400">After spend</p>
                           <p className={`text-base font-bold ${deltaColor(tvDelta)}`}>{formatCompactBudgetValue(newTvSpend)}</p>
+                          <p className="text-[10px] font-semibold text-blue-600">Reach {formatCompactCountValue(newTvReachValue)}</p>
                           <p className="text-[10px] text-slate-500">Spend split {formatMetric(newTvSharePct, 1)}%</p>
                         </div>
                       </div>
@@ -4242,12 +4257,14 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                         <div className="flex-1 text-center">
                           <p className="text-[10px] uppercase tracking-wide text-slate-400">Before spend</p>
                           <p className="text-base font-bold text-slate-700">{formatCompactBudgetValue(oldDigSpend)}</p>
+                          <p className="text-[10px] font-semibold text-purple-600">Reach {formatCompactCountValue(oldDigReach)}</p>
                           <p className="text-[10px] text-slate-500">Spend split {formatMetric(100 - oldTvSharePct, 1)}%</p>
                         </div>
                         <p className="mb-1 text-slate-300">→</p>
                         <div className="flex-1 text-center">
                           <p className="text-[10px] uppercase tracking-wide text-slate-400">After spend</p>
                           <p className={`text-base font-bold ${deltaColor(digDelta)}`}>{formatCompactBudgetValue(newDigSpend)}</p>
+                          <p className="text-[10px] font-semibold text-purple-600">Reach {formatCompactCountValue(newDigReachValue)}</p>
                           <p className="text-[10px] text-slate-500">Spend split {formatMetric(100 - newTvSharePct, 1)}%</p>
                         </div>
                       </div>
