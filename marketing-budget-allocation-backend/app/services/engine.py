@@ -569,6 +569,9 @@ def _build_market_elasticity_guidance(
 
 
 def _detect_market_intelligence_file() -> Path | None:
+    preferred_ai = BASE_DIR / "Data for MMM AI.xlsx"
+    if preferred_ai.exists() and preferred_ai.is_file():
+        return preferred_ai
     preferred = BASE_DIR / "MMM (1).xlsx"
     if preferred.exists() and preferred.is_file():
         return preferred
@@ -589,6 +592,40 @@ def _normalize_percent_like(value: Any) -> float | None:
     if abs(raw) <= 1.5:
         raw *= 100.0
     return float(raw)
+
+
+def _read_market_intelligence_sheets(path: Path) -> list[tuple[str, pd.DataFrame]]:
+    try:
+        xls = pd.ExcelFile(path)
+    except Exception:
+        return []
+    frames: list[tuple[str, pd.DataFrame]] = []
+    for sheet in xls.sheet_names:
+        try:
+            df = pd.read_excel(path, sheet_name=sheet)
+        except Exception:
+            continue
+        df.columns = [str(c).strip() for c in df.columns]
+        frames.append((sheet, df))
+    return frames
+
+
+def _market_intelligence_brand_keys(path: Path | None) -> set[str]:
+    if path is None:
+        return set()
+    out: set[str] = set()
+    for sheet, df in _read_market_intelligence_sheets(path):
+        brand_col = next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Brand")), "")
+        if brand_col:
+            for value in df[brand_col].dropna().astype(str):
+                key = _normalize_name_key(value)
+                if key:
+                    out.add(key)
+        else:
+            key = _normalize_name_key(sheet)
+            if key:
+                out.add(key)
+    return out
 
 
 def _compute_relative_metric_bands(values: list[float]) -> tuple[float, float]:
@@ -636,7 +673,7 @@ def _build_market_intelligence_guidance(
 ) -> dict[str, Any]:
     guidance: dict[str, Any] = {
         "source_file": None,
-        "sheet_name": "GERC Market-Level",
+        "sheet_name": None,
         "brand": brand,
         "matched_row_count": 0,
         "rows": [],
@@ -647,13 +684,32 @@ def _build_market_intelligence_guidance(
         guidance["notes"] = ["Market intelligence workbook not found."]
         return guidance
     guidance["source_file"] = path.name
-    try:
-        df = pd.read_excel(path, sheet_name="GERC Market-Level")
-    except Exception:
-        guidance["notes"] = ["Could not read market intelligence workbook sheet 'GERC Market-Level'."]
+    target_brand_key = _normalize_name_key(brand)
+    sheet_frames = _read_market_intelligence_sheets(path)
+    if not sheet_frames:
+        guidance["notes"] = ["Could not read market intelligence workbook."]
         return guidance
 
-    df.columns = [str(c).strip() for c in df.columns]
+    matched_sheet = ""
+    matched_df: pd.DataFrame | None = None
+    for sheet, candidate in sheet_frames:
+        brand_col = next((c for c in candidate.columns if _normalize_name_key(c) == _normalize_name_key("Brand")), "")
+        if brand_col:
+            brand_mask = candidate[brand_col].astype(str).map(_normalize_name_key) == target_brand_key
+            if brand_mask.any():
+                matched_sheet = sheet
+                matched_df = candidate[brand_mask].copy()
+                break
+        if _normalize_name_key(sheet) == target_brand_key:
+            matched_sheet = sheet
+            matched_df = candidate.copy()
+            break
+    if matched_df is None:
+        guidance["notes"] = [f"No market intelligence sheet or rows found for brand '{brand}'."]
+        return guidance
+
+    guidance["sheet_name"] = matched_sheet
+    df = matched_df.copy()
     required_cols = {
         "brand": next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Brand")), ""),
         "market": next((c for c in df.columns if _normalize_name_key(c) == _normalize_name_key("Market")), ""),
@@ -674,7 +730,7 @@ def _build_market_intelligence_guidance(
     if not filtered.empty:
         filtered = filtered.drop_duplicates(subset=["_market_key"], keep="first")
     if filtered.empty:
-        guidance["notes"] = ["No market intelligence rows matched the selected markets in the shared market-level MMM sheet."]
+        guidance["notes"] = [f"No market intelligence rows matched the selected markets in sheet '{matched_sheet}'."]
         return guidance
 
     elasticity_map = {
@@ -724,7 +780,7 @@ def _build_market_intelligence_guidance(
     order = {m: i for i, m in enumerate(selected_markets)}
     rows = sorted(rows, key=lambda r: order.get(str(r.get("market", "")), 10**6))
     if not rows:
-        guidance["notes"] = ["No market intelligence rows matched the selected markets in the shared market-level MMM sheet."]
+        guidance["notes"] = [f"No market intelligence rows matched the selected markets in sheet '{matched_sheet}'."]
         return guidance
 
     for metric_key in ("category_salience", "brand_salience", "market_share"):
@@ -758,7 +814,7 @@ def _build_market_intelligence_guidance(
     guidance["matched_row_count"] = len(rows)
     guidance["rows"] = rows
     missing_markets = [m for m in selected_markets if m not in {str(r.get("market", "")) for r in rows}]
-    guidance["notes"] = ["Using shared market-level MMM guidance across brands."]
+    guidance["notes"] = [f"Using brand-specific market intelligence from sheet '{guidance.get('sheet_name')}'."]
     if missing_markets:
         guidance["notes"].append(f"Market intelligence missing for {len(missing_markets)} selected markets.")
     return guidance
@@ -794,6 +850,9 @@ def _read_brand_market_map(market_weights_path: Path) -> dict[str, list[str]]:
 def _build_auto_config() -> dict:
     global _AUTO_CONFIG_CACHE, _AUTO_CONFIG_SIGNATURE
     candidates = _list_result_files()
+    market_intelligence_path = _detect_market_intelligence_file()
+    if market_intelligence_path is not None:
+        candidates = candidates + [market_intelligence_path]
     sig = _results_signature(candidates)
     if _AUTO_CONFIG_CACHE is not None and _AUTO_CONFIG_SIGNATURE == sig:
         return _AUTO_CONFIG_CACHE
@@ -803,6 +862,13 @@ def _build_auto_config() -> dict:
         raise HTTPException(status_code=400, detail="Could not auto-detect required files in results/.")
 
     bm = _read_brand_market_map(files["market_weights"])
+    market_intelligence_brand_keys = _market_intelligence_brand_keys(market_intelligence_path)
+    if market_intelligence_brand_keys:
+        bm = {
+            brand: markets
+            for brand, markets in bm.items()
+            if _normalize_name_key(brand) in market_intelligence_brand_keys
+        }
     brands = sorted(bm.keys())
     default_brand = brands[0] if brands else ""
     out = {
@@ -811,6 +877,7 @@ def _build_auto_config() -> dict:
             "model_data": files["model_data"].name if files["model_data"] else None,
             "market_weights": files["market_weights"].name if files["market_weights"] else None,
             "max_reach": files["max_reach"].name if files["max_reach"] else None,
+            "market_intelligence": market_intelligence_path.name if market_intelligence_path else None,
         },
         "brands": brands,
         "markets_by_brand": bm,
