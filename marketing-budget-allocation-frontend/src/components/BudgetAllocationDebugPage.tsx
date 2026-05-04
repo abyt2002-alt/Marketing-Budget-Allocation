@@ -4104,13 +4104,13 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
               {xTicks.map((x, i) => (
                 <text key={i} x={mx(x)} y={H - 30} textAnchor="middle" fontSize="9" fill="#94a3b8">{fmtX(x)}</text>
               ))}
-              <text x={W / 2} y={H - 18} textAnchor="middle" fontSize="9" fill="#94a3b8">{modalSCurveChannel === 'tv' ? 'TV Reach' : 'Digital Reach'}</text>
+              <text x={W / 2} y={H - 18} textAnchor="middle" fontSize="9" fill="#94a3b8">{modalSCurveChannel === 'tv' ? 'TV reach input' : 'Digital reach input'}</text>
             </svg>
             {(minReach != null || maxReach != null) && (
               <div className="mt-1 flex items-center gap-4 px-1 text-[10px]" style={{ color: curveColor }}>
                 {minReach != null && <span>Min: <strong>{fmtX(Number(minReach))}</strong></span>}
                 {maxReach != null && <span>Max: <strong>{fmtX(Number(maxReach))}</strong></span>}
-                <span className="text-slate-400 ml-auto">Shaded band = feasible reach range</span>
+                <span className="text-slate-400 ml-auto">Shaded band = feasible reach input range</span>
               </div>
             )}
             </div>
@@ -4184,7 +4184,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
 
                 {/* TV / Digital cards */}
                 <div>
-                  <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-blue-600">TV vs Digital Budget Split</p>
+                  <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide text-blue-600">TV vs Digital Spend Split</p>
                   <div className="grid grid-cols-2 gap-3">
                     {/* TV */}
                     <button
@@ -4204,20 +4204,20 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       </div>
                       <div className="mt-3 flex items-end gap-2">
                         <div className="flex-1 text-center">
-                          <p className="text-[10px] uppercase tracking-wide text-slate-400">Before</p>
+                          <p className="text-[10px] uppercase tracking-wide text-slate-400">Before spend</p>
                           <p className="text-base font-bold text-slate-700">{formatCompactBudgetValue(oldTvSpend)}</p>
-                          <p className="text-[10px] text-slate-500">{formatMetric(oldTvSharePct, 1)}% of market</p>
+                          <p className="text-[10px] text-slate-500">Spend split {formatMetric(oldTvSharePct, 1)}%</p>
                         </div>
                         <p className="mb-1 text-slate-300">→</p>
                         <div className="flex-1 text-center">
-                          <p className="text-[10px] uppercase tracking-wide text-slate-400">After</p>
+                          <p className="text-[10px] uppercase tracking-wide text-slate-400">After spend</p>
                           <p className={`text-base font-bold ${deltaColor(tvDelta)}`}>{formatCompactBudgetValue(newTvSpend)}</p>
-                          <p className="text-[10px] text-slate-500">{formatMetric(newTvSharePct, 1)}% of market</p>
+                          <p className="text-[10px] text-slate-500">Spend split {formatMetric(newTvSharePct, 1)}%</p>
                         </div>
                       </div>
                       {(oldTvReachPct > 0 || newTvReachPct > 0) && (
                         <p className="mt-2 text-[10px] text-slate-400">
-                          Reach mix: {formatMetric(oldTvReachPct, 1)}% → <span className={deltaColor(newTvReachPct - oldTvReachPct)}>{formatMetric(newTvReachPct, 1)}%</span>
+                          Reach split: {formatMetric(oldTvReachPct, 1)}% → <span className={deltaColor(newTvReachPct - oldTvReachPct)}>{formatMetric(newTvReachPct, 1)}%</span>
                         </p>
                       )}
                     </button>
@@ -4240,20 +4240,20 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       </div>
                       <div className="mt-3 flex items-end gap-2">
                         <div className="flex-1 text-center">
-                          <p className="text-[10px] uppercase tracking-wide text-slate-400">Before</p>
+                          <p className="text-[10px] uppercase tracking-wide text-slate-400">Before spend</p>
                           <p className="text-base font-bold text-slate-700">{formatCompactBudgetValue(oldDigSpend)}</p>
-                          <p className="text-[10px] text-slate-500">{formatMetric(100 - oldTvSharePct, 1)}% of market</p>
+                          <p className="text-[10px] text-slate-500">Spend split {formatMetric(100 - oldTvSharePct, 1)}%</p>
                         </div>
                         <p className="mb-1 text-slate-300">→</p>
                         <div className="flex-1 text-center">
-                          <p className="text-[10px] uppercase tracking-wide text-slate-400">After</p>
+                          <p className="text-[10px] uppercase tracking-wide text-slate-400">After spend</p>
                           <p className={`text-base font-bold ${deltaColor(digDelta)}`}>{formatCompactBudgetValue(newDigSpend)}</p>
-                          <p className="text-[10px] text-slate-500">{formatMetric(100 - newTvSharePct, 1)}% of market</p>
+                          <p className="text-[10px] text-slate-500">Spend split {formatMetric(100 - newTvSharePct, 1)}%</p>
                         </div>
                       </div>
                       {(oldDigReachPct > 0 || newDigReachPct > 0) && (
                         <p className="mt-2 text-[10px] text-slate-400">
-                          Reach mix: {formatMetric(oldDigReachPct, 1)}% → <span className={deltaColor(newDigReachPct - oldDigReachPct)}>{formatMetric(newDigReachPct, 1)}%</span>
+                          Reach split: {formatMetric(oldDigReachPct, 1)}% → <span className={deltaColor(newDigReachPct - oldDigReachPct)}>{formatMetric(newDigReachPct, 1)}%</span>
                         </p>
                       )}
                     </button>
@@ -4264,7 +4264,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 {modalSCurveChannel && (
                   <div className="rounded-xl border border-slate-200 bg-white p-3">
                     <p className="mb-2 text-[10px] font-semibold uppercase tracking-wide" style={{ color: curveColor }}>
-                      {modalSCurveChannel === 'tv' ? 'TV' : 'Digital'} S-Curve — {r.market}
+                      {modalSCurveChannel === 'tv' ? 'TV' : 'Digital'} S-Curve: reach input vs volume - {r.market}
                     </p>
                     {renderSCurveChart()}
                   </div>
