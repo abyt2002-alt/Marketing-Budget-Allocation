@@ -2228,22 +2228,58 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                           </div>
                         </div>
 
-                        <div className="grid gap-3 lg:grid-cols-2">
-                          <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-700">What Supports The Plan</p>
-                            <div className="mt-3 grid max-h-[34rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
-                              {supportPlanReviews.length > 0
-                                ? supportPlanReviews.map((review) => renderApprovalReasonBlock(review, 'support'))
-                                : <p className="text-sm text-emerald-800">No support signals available.</p>}
-                            </div>
-                          </div>
-                          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4">
-                            <p className="text-xs font-bold uppercase tracking-[0.12em] text-rose-700">What Needs Review</p>
-                            <div className="mt-3 grid max-h-[34rem] gap-3 overflow-y-auto pr-1 sm:grid-cols-2">
-                              {needsReviewPlanReviews.length > 0
-                                ? needsReviewPlanReviews.map((review) => renderApprovalReasonBlock(review, 'review'))
-                                : <p className="text-sm text-rose-800">No review flags available.</p>}
-                            </div>
+                        <div className="rounded-2xl border border-slate-200 bg-white px-4 py-4">
+                          <p className="text-xs font-bold uppercase tracking-[0.12em] text-slate-600">Market Signals</p>
+                          <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 max-h-[34rem] overflow-y-auto pr-1">
+                            {orderedMarketReviews.map((review) => {
+                              const hasSupport = review.supporting_points.length > 0
+                              const hasWarning = review.warning_points.length > 0
+                              const verdictColor = review.verdict === 'supported'
+                                ? 'border-emerald-200 bg-emerald-50'
+                                : review.verdict === 'at_risk'
+                                  ? 'border-rose-200 bg-rose-50'
+                                  : 'border-amber-200 bg-amber-50'
+                              const verdictBadge = review.verdict === 'supported'
+                                ? 'bg-emerald-100 text-emerald-700'
+                                : review.verdict === 'at_risk'
+                                  ? 'bg-rose-100 text-rose-700'
+                                  : 'bg-amber-100 text-amber-700'
+                              return (
+                                <div key={review.market} className={`rounded-2xl border px-4 py-3 ${verdictColor}`}>
+                                  <div className="flex items-start justify-between gap-2">
+                                    <p className="font-semibold text-slate-800 text-sm">{review.market}</p>
+                                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${verdictBadge}`}>
+                                      {review.verdict === 'at_risk' ? 'At risk' : review.verdict === 'supported' ? 'Supported' : 'Mixed'}
+                                    </span>
+                                  </div>
+                                  {hasSupport && (
+                                    <ul className="mt-2 space-y-1">
+                                      {review.supporting_points.map((pt, i) => (
+                                        <li key={i} className="flex gap-1.5 text-[11px] text-emerald-700">
+                                          <span className="mt-0.5 shrink-0 font-bold">✓</span>
+                                          <span>{pt}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                  {hasWarning && (
+                                    <ul className="mt-2 space-y-1">
+                                      {review.warning_points.map((pt, i) => (
+                                        <li key={i} className="flex gap-1.5 text-[11px] text-rose-700">
+                                          <span className="mt-0.5 shrink-0 font-bold">!</span>
+                                          <span>{pt}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                  <div className="mt-2.5 flex flex-wrap gap-1.5">
+                                    {review.avg_elasticity_band && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">Elasticity: {review.avg_elasticity_band}</span>}
+                                    {review.avg_cpr_band && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">CPR: {review.avg_cpr_band}</span>}
+                                    {review.brand_salience != null && <span className="rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-slate-600">Salience: {review.brand_salience_band ?? review.brand_salience}</span>}
+                                  </div>
+                                </div>
+                              )
+                            })}
                           </div>
                         </div>
 
