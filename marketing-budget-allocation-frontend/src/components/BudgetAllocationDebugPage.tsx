@@ -1152,7 +1152,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const scenarioGenerationActive = scenarioStatus === 'queued' || scenarioStatus === 'running'
   const zoomGenerationActive = zoomStatus === 'queued' || zoomStatus === 'running'
 
-  const confidencePct = hitl ? Math.round(hitl.confidence * 100) : null
   const approvalHeadline = approvalEvaluation?.ai_review.headline || approvalEvaluation?.deterministic_overview.headline || ''
   const supportedReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'supported') ?? []
   const mixedReviews = approvalEvaluation?.market_reviews.filter((review) => review.verdict === 'mixed') ?? []
