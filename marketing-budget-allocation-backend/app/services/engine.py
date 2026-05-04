@@ -7123,6 +7123,19 @@ def _resolve_scenario_intent_payload(
         "matched_row_count": int(market_guidance.get("matched_row_count", 0) or 0),
         "notes": market_guidance.get("notes", []),
     }
+    # Include per-market signal snapshot so frontend can display it
+    result["market_signal_rows"] = [
+        {
+            "market": str(row.get("market", "")).strip(),
+            "change_in_market_share": row.get("change_in_market_share"),
+            "change_in_brand_equity": row.get("change_in_brand_equity"),
+            "category_salience": row.get("category_salience"),
+            "brand_salience": row.get("brand_salience"),
+            "responsiveness_label": row.get("responsiveness_label", ""),
+        }
+        for row in market_rows
+        if str(row.get("market", "")).strip()
+    ]
     return result
 
 

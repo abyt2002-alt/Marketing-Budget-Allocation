@@ -933,6 +933,8 @@ function App() {
   const [scenarioIntentPartial, setScenarioIntentPartial] = useState<ScenarioResolvedIntent | null>(null)
   const [scenarioIntentConfirmationRequired, setScenarioIntentConfirmationRequired] = useState(false)
   const [scenarioIntentNotes, setScenarioIntentNotes] = useState<string[]>([])
+  const [marketSignalRows, setMarketSignalRows] = useState<Array<{market:string,change_in_market_share:number|null,change_in_brand_equity:number|null,category_salience:number|null,brand_salience:number|null,responsiveness_label:string}>>([])
+  const [showMarketSignals, setShowMarketSignals] = useState(false)
   const [scenarioJobId, setScenarioJobId] = useState('')
   const [scenarioStatus, setScenarioStatus] = useState<'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'expired'>('idle')
   const [scenarioProgress, setScenarioProgress] = useState(0)
@@ -1908,6 +1910,9 @@ function App() {
     setScenarioIntentResolved(response.resolved_intent ?? null)
     setScenarioIntentConfirmationRequired(Boolean(response.confirmation_required))
     setScenarioIntentStatus(response.status === 'ready' ? 'ready' : 'needs_clarification')
+    if (Array.isArray((response as any).market_signal_rows)) {
+      setMarketSignalRows((response as any).market_signal_rows)
+    }
   }
 
   function buildScenarioIntentPayload() {
@@ -2908,6 +2913,57 @@ function App() {
                     Try: "smaller markets" • "losing share" • "gaining share" • "high salience" • "low salience" • "bigger markets"
                   </p>
                 </div>
+                {marketSignalRows.length > 0 && (
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      onClick={() => setShowMarketSignals(v => !v)}
+                      className="text-[11px] font-semibold text-slate-500 underline underline-offset-2 hover:text-slate-800"
+                    >
+                      {showMarketSignals ? '▲ Hide' : '▼ Show'} market signals ({marketSignalRows.length} markets)
+                    </button>
+                    {showMarketSignals && (
+                      <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+                        <table className="w-full text-[11px]">
+                          <thead>
+                            <tr className="border-b border-slate-100 bg-slate-50">
+                              <th className="px-3 py-2 text-left font-semibold text-slate-600">Market</th>
+                              <th className="px-3 py-2 text-right font-semibold text-slate-600">Mkt Share Δ</th>
+                              <th className="px-3 py-2 text-right font-semibold text-slate-600">Brand Equity Δ</th>
+                              <th className="px-3 py-2 text-right font-semibold text-slate-600">Cat. Salience</th>
+                              <th className="px-3 py-2 text-right font-semibold text-slate-600">Brand Salience</th>
+                              <th className="px-3 py-2 text-center font-semibold text-slate-600">Responsiveness</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {marketSignalRows.map((row) => (
+                              <tr key={row.market} className="border-b border-slate-50 hover:bg-slate-50">
+                                <td className="px-3 py-1.5 font-medium text-slate-800">{row.market}</td>
+                                <td className={`px-3 py-1.5 text-right font-semibold ${row.change_in_market_share != null && row.change_in_market_share < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                                  {row.change_in_market_share != null ? `${row.change_in_market_share > 0 ? '+' : ''}${(row.change_in_market_share * 100).toFixed(1)}%` : '—'}
+                                </td>
+                                <td className={`px-3 py-1.5 text-right font-semibold ${row.change_in_brand_equity != null && row.change_in_brand_equity < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                                  {row.change_in_brand_equity != null ? `${row.change_in_brand_equity > 0 ? '+' : ''}${(row.change_in_brand_equity * 100).toFixed(1)}%` : '—'}
+                                </td>
+                                <td className="px-3 py-1.5 text-right text-slate-600">
+                                  {row.category_salience != null ? `${(row.category_salience * 100).toFixed(1)}%` : '—'}
+                                </td>
+                                <td className="px-3 py-1.5 text-right text-slate-600">
+                                  {row.brand_salience != null ? `${(row.brand_salience * 100).toFixed(1)}%` : '—'}
+                                </td>
+                                <td className="px-3 py-1.5 text-center">
+                                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${row.responsiveness_label?.toLowerCase().includes('high') ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>
+                                    {row.responsiveness_label || '—'}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div ref={marketDropdownRef} className="relative">
