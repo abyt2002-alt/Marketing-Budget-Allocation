@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import axios from 'axios'
 import {
@@ -18,9 +18,12 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Line,
+  LineChart,
   ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
   LabelList,
@@ -35,6 +38,16 @@ import {
   type SavedItemSummary,
 } from './saved/SavedItemsStore'
 import { BudgetAllocationDebugPage } from './components/BudgetAllocationDebugPage'
+import { InvestmentFrameworkChart } from './components/InvestmentFrameworkChart'
+import type { InvestmentFrameworkData } from './components/InvestmentFrameworkChart'
+import { IndiaMapChart } from './components/IndiaMapChart'
+
+const TRINITY_TREND_BRANDS = new Set([
+  'Aer Matic',
+  'Aer PP',
+  'Aer Spray',
+  'Godrej Expert Rich Crème',
+])
 
 type AutoConfigResponse = {
   status: 'ok' | 'error'
@@ -979,6 +992,28 @@ function App() {
   const [aiModeLoading, setAiModeLoading] = useState(false)
   const [aiModeError, setAiModeError] = useState('')
   const [aiModeData, setAiModeData] = useState<AIInsightsSummaryResponse | null>(null)
+  const [frameworkData, setFrameworkData] = useState<InvestmentFrameworkData | null>(null)
+  const [, setFrameworkLoading] = useState(false)
+  const [investSummary, setInvestSummary] = useState<{
+    media_diagnosis: string
+    investment_posture: string
+    market_archetypes: {
+      growth_champions: { markets: string[]; reason: string }
+      scale_up_core: { markets: string[]; reason: string }
+      momentum_protect: { markets: string[]; reason: string }
+      emerging_bets: { markets: string[]; reason: string }
+      efficiency_laggards: { markets: string[]; reason: string }
+      false_positive_growth: { markets: string[]; reason: string }
+    }
+    budget_action: { increase: string[]; hold: string[]; reduce: string[]; test: string[]; budget_move: string }
+    executive_summary: string
+    provider: string
+  } | null>(null)
+  const [investSummaryLoading, setInvestSummaryLoading] = useState(false)
+  const [trinityTrendMarket, setTrinityTrendMarket] = useState('')
+  const [trinityTrendData, setTrinityTrendData] = useState<DriverAnalysisResponse | null>(null)
+  const [trinityTrendLoading, setTrinityTrendLoading] = useState(false)
+  const [trinityTrendError, setTrinityTrendError] = useState('')
   const latestInsightsSelectionRef = useRef<{ brand: string; market: string }>({ brand: '', market: '' })
   const marketDropdownRef = useRef<HTMLDivElement | null>(null)
   const savedMenuRef = useRef<HTMLDivElement | null>(null)
@@ -986,6 +1021,7 @@ function App() {
   const contributionRequestSeqRef = useRef(0)
   const yoyRequestSeqRef = useRef(0)
   const driverAnalysisRequestSeqRef = useRef(0)
+  const trinityTrendRequestSeqRef = useRef(0)
   const sCurvesCacheRef = useRef<Map<string, SCurvesResponse>>(new Map())
   const contributionCacheRef = useRef<Map<string, ContributionResponse>>(new Map())
   const yoyCacheRef = useRef<Map<string, YoyGrowthResponse>>(new Map())
@@ -1270,6 +1306,34 @@ function App() {
       }
     }
   }, [aiModeOpen, aiModeBrand, step2BrandOptions, selectedBrand])
+
+  const handleGenerateTrinityFramework = useCallback(async () => {
+    if (!aiModeBrand) return
+    setAiModeLoading(true)
+    setFrameworkData(null)
+    setInvestSummary(null)
+    setInvestSummaryLoading(true)
+    setFrameworkLoading(true)
+    try {
+      const fRes = await axios.get<InvestmentFrameworkData>(`${API_BASE_URL}/api/investment-framework`, { params: { brand: aiModeBrand } })
+      setFrameworkData(fRes.data)
+      setFrameworkLoading(false)
+      if (fRes.data.status === 'ok' && fRes.data.markets.length > 0) {
+        const sRes = await axios.post(`${API_BASE_URL}/api/investment-summary`, {
+          brand: aiModeBrand,
+          national_elasticity: (fRes.data as any).national_elasticity ?? null,
+          national_yoy: (fRes.data as any).national_yoy ?? null,
+          markets: fRes.data.markets,
+        })
+        setInvestSummary(sRes.data)
+      }
+    } catch {
+      setFrameworkLoading(false)
+    } finally {
+      setAiModeLoading(false)
+      setInvestSummaryLoading(false)
+    }
+  }, [aiModeBrand])
 
   useEffect(() => {
     setStep1BaselineBudget(null)
@@ -1796,6 +1860,52 @@ function App() {
   function closeAiModeModal() {
     setAiModeOpen(false)
     setAiModeLoading(false)
+    closeTrinityTrendModal()
+  }
+
+  function closeTrinityTrendModal() {
+    setTrinityTrendMarket('')
+    setTrinityTrendData(null)
+    setTrinityTrendError('')
+    setTrinityTrendLoading(false)
+    trinityTrendRequestSeqRef.current += 1
+  }
+
+  async function openTrinityTrendModal(market: string) {
+    const brandAtRequest = aiModeBrand
+    setTrinityTrendMarket(market)
+    setTrinityTrendData(null)
+    setTrinityTrendError('')
+
+    if (!TRINITY_TREND_BRANDS.has(brandAtRequest)) {
+      setTrinityTrendError('Trend view is available for Lumière Noir, Cedar Mist, Amber Dusk, and Rosé Élite.')
+      return
+    }
+
+    const requestId = ++trinityTrendRequestSeqRef.current
+    try {
+      setTrinityTrendLoading(true)
+      const response = await axios.post<DriverAnalysisResponse>(`${API_BASE_URL}/api/driver-analysis-auto`, {
+        selected_brand: brandAtRequest,
+        selected_market: market,
+        months_back: 24,
+        top_n: 8,
+      })
+      if (requestId !== trinityTrendRequestSeqRef.current || brandAtRequest !== aiModeBrand) return
+      setTrinityTrendData(response.data)
+    } catch (error) {
+      if (requestId !== trinityTrendRequestSeqRef.current) return
+      setTrinityTrendData(null)
+      if (axios.isAxiosError(error)) {
+        setTrinityTrendError(error.response?.data?.detail ?? 'Failed to load market trend.')
+      } else {
+        setTrinityTrendError('Failed to load market trend.')
+      }
+    } finally {
+      if (requestId === trinityTrendRequestSeqRef.current) {
+        setTrinityTrendLoading(false)
+      }
+    }
   }
 
   async function handleGenerateAiInsights() {
@@ -1879,10 +1989,12 @@ function App() {
       } else {
         setAiModeError('Failed to generate AI insights.')
       }
-    } finally {
+      } finally {
       setAiModeLoading(false)
     }
   }
+
+  void handleGenerateAiInsights
 
   async function fetchScenarioResults(jobId: string, page = scenarioPage) {
     const params: Record<string, string | number> = {
@@ -4354,6 +4466,110 @@ function App() {
       })
       .filter((note, index, arr) => arr.indexOf(note) === index)
 
+    void [summaryJson, reportDate, renderSummaryActionList, renderMediaInvestmentFramework, userFacingNotes]
+
+    const renderTrinityTrendModal = () => {
+      if (!trinityTrendMarket) return null
+      const chartRows = (trinityTrendData?.timeline ?? []).map((point) => ({
+        month: point.date_label || point.date,
+        actual_volume_lakh: Number(point.volume_mn ?? 0) * 10,
+        predicted_volume_lakh: Number(point.predicted_volume_mn ?? 0) * 10,
+      }))
+      const firstRow = chartRows[0]
+      const lastRow = chartRows[chartRows.length - 1]
+      const summary = trinityTrendData?.summary
+
+      return (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-slate-900/35 px-4 py-6 backdrop-blur-sm">
+          <button type="button" aria-label="Close market trend" className="absolute inset-0" onClick={closeTrinityTrendModal} />
+          <div className="relative w-full max-w-4xl rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-4">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-primary">Market Volume Trend</p>
+                <h3 className="mt-1 text-lg font-semibold text-dark-text">
+                  {displayBrand(aiModeBrand)} - {trinityTrendMarket}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={closeTrinityTrendModal}
+                className="rounded-lg border border-slate-300 bg-white p-1.5 text-slate-600 hover:bg-slate-100"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {trinityTrendLoading ? (
+              <div className="mt-4 space-y-3">
+                <div className="h-6 w-56 animate-pulse rounded bg-slate-100" />
+                <div className="h-72 animate-pulse rounded-xl border border-slate-200 bg-slate-100" />
+              </div>
+            ) : null}
+
+            {!trinityTrendLoading && trinityTrendError ? (
+              <div className="mt-4 rounded-lg border border-danger/20 bg-danger/10 px-3 py-2 text-sm text-danger">
+                {trinityTrendError}
+              </div>
+            ) : null}
+
+            {!trinityTrendLoading && !trinityTrendError && trinityTrendData ? (
+              <div className="mt-4 space-y-4">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-blue-600">Period</p>
+                    <p className="mt-1 text-sm font-bold text-blue-950">
+                      {trinityTrendData.selection.from_label || firstRow?.month || '-'} to {trinityTrendData.selection.to_label || lastRow?.month || '-'}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-emerald-700">Latest Actual Volume</p>
+                    <p className="mt-1 text-sm font-bold text-emerald-950">
+                      {summary ? `${formatRawNumber(Number(summary.volume_now_mn ?? 0) * 10)} Lakh` : '-'}
+                    </p>
+                  </div>
+                </div>
+
+                {chartRows.length === 0 ? (
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-8 text-center text-sm text-slate-500">
+                    No monthly trend points were returned for this brand-market.
+                  </div>
+                ) : (
+                  <div className="h-80 rounded-xl border border-slate-200 bg-white p-3">
+                    <div className="mb-2 flex flex-wrap items-center gap-4 px-1 text-[11px] font-semibold text-slate-600">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-0.5 w-7 rounded-full bg-[#2563EB]" />
+                        Actual Volume
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-0.5 w-7 rounded-full border-t-2 border-dashed border-[#16A34A]" />
+                        Predicted Volume
+                      </span>
+                    </div>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={chartRows} margin={{ top: 12, right: 16, bottom: 8, left: 4 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
+                        <XAxis dataKey="month" tick={{ fontSize: 10, fill: '#64748B' }} minTickGap={18} />
+                        <YAxis tick={{ fontSize: 10, fill: '#64748B' }} label={{ value: 'Volume (Lakh)', angle: -90, position: 'insideLeft', style: { fontSize: 11, fill: '#64748B', fontWeight: 700 } }} />
+                        <Tooltip
+                          formatter={(value, name) => [
+                            `${Number(value).toFixed(2)} Lakh`,
+                            name === 'actual_volume_lakh' ? 'Actual Volume' : 'Predicted Volume',
+                          ]}
+                          labelStyle={{ color: '#0F172A', fontWeight: 700 }}
+                        />
+                        <Line type="monotone" dataKey="actual_volume_lakh" stroke="#2563EB" strokeWidth={2.4} dot={{ r: 2.5 }} activeDot={{ r: 4 }} />
+                        <Line type="monotone" dataKey="predicted_volume_lakh" stroke="#16A34A" strokeWidth={2} strokeDasharray="5 4" dot={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )
+    }
+
     return (
       <div className="fixed inset-0 z-50">
         <button type="button" aria-label="Close Trinity Mode" className="absolute inset-0 bg-slate-900/45" onClick={closeAiModeModal} />
@@ -4384,7 +4600,14 @@ function App() {
                   <label className="text-xs font-semibold uppercase tracking-wide text-slate-500">Brand</label>
                   <select
                     value={aiModeBrand}
-                    onChange={(event) => setAiModeBrand(event.target.value)}
+                    onChange={(event) => {
+                      setAiModeBrand(event.target.value)
+                      setFrameworkData(null)
+                      setInvestSummary(null)
+                      setInvestSummaryLoading(false)
+                      setAiModeLoading(false)
+                      closeTrinityTrendModal()
+                    }}
                     className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-blue-200"
                   >
                     {step2BrandOptions.map((brand) => (
@@ -4398,16 +4621,16 @@ function App() {
                 <div className="rounded-lg border border-slate-200 bg-white p-3">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Coverage</p>
                   <p className="mt-1 text-sm font-semibold text-dark-text">{aiModeMarkets.length} Markets</p>
-                  <p className="mt-1 text-xs text-slate-500">Trinity auto-summarizes S-Curves, contribution drivers, and YoY signals into a business-ready report.</p>
+                  <p className="mt-1 text-xs text-slate-500">Generates an AI executive summary and media investment framework for the selected brand.</p>
                 </div>
 
                 <button
                   type="button"
-                  onClick={() => void handleGenerateAiInsights()}
+                  onClick={() => void handleGenerateTrinityFramework()}
                   disabled={aiModeLoading || !aiModeBrand || aiModeMarkets.length === 0}
                   className="w-full rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-400"
                 >
-                  {aiModeLoading ? 'Generating Report...' : 'Generate Trinity Report'}
+                  {aiModeLoading ? 'Generating...' : 'Generate Trinity Report'}
                 </button>
 
                 {aiModeError ? (
@@ -4417,260 +4640,131 @@ function App() {
             </aside>
 
             <section className="flex-1 overflow-y-auto bg-white p-5 sm:p-6">
-              {!aiModeData && !aiModeLoading ? (
+              {/* Empty state */}
+              {!aiModeLoading && !frameworkData ? (
                 <div className="flex h-full items-center justify-center rounded-xl border border-dashed border-slate-300 bg-slate-50">
                   <div className="max-w-md text-center">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Trinity Report Output</p>
-                    <p className="mt-2 text-base font-semibold text-dark-text">Generate a polished brand report for the selected brand.</p>
-                    <p className="mt-2 text-sm text-slate-600">You will get executive summary, state clustering, recommendations, and action priorities.</p>
+                    <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
+                      <Bot className="h-5 w-5 text-primary" />
+                    </div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Trinity Mode</p>
+                    <p className="mt-2 text-base font-semibold text-dark-text">Select a brand and generate the report.</p>
+                    <p className="mt-1 text-sm text-slate-500">You will get an AI executive summary and the media investment framework grid.</p>
                   </div>
                 </div>
               ) : null}
 
+              {/* Loading skeleton */}
               {aiModeLoading ? (
-                <div className="space-y-3">
-                  <div className="h-16 animate-pulse rounded-xl border border-slate-200 bg-slate-100" />
-                  <div className="h-36 animate-pulse rounded-xl border border-slate-200 bg-slate-100" />
-                  <div className="h-56 animate-pulse rounded-xl border border-slate-200 bg-slate-100" />
+                <div className="space-y-4">
+                  <div className="h-32 animate-pulse rounded-xl border border-slate-200 bg-slate-100" />
+                  <div className="h-24 animate-pulse rounded-xl border border-slate-200 bg-slate-100" />
+                  <div className="h-64 animate-pulse rounded-xl border border-slate-200 bg-slate-100" />
                 </div>
               ) : null}
 
-              {!aiModeLoading && aiModeData ? (
-                <div className="space-y-4">
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-primary">Trinity Brand Report</p>
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Generated: {reportDate}</p>
+              {/* Results — summary + grid */}
+              {!aiModeLoading && frameworkData?.status === 'ok' ? (
+                <div className="space-y-5">
+                  {/* AI Investment Cards */}
+                  {investSummaryLoading ? (
+                    <div className="grid grid-cols-2 gap-3">
+                      {[...Array(6)].map((_, i) => <div key={i} className="h-28 animate-pulse rounded-xl border border-slate-200 bg-slate-100" />)}
                     </div>
-                    <h4 className="mt-2 text-lg font-semibold text-dark-text">
-                      {summaryJson?.headline || `${aiModeData.selection.brand} Portfolio Intelligence`}
-                    </h4>
-                    <p className="mt-1 text-sm text-slate-600">
-                      Auto-generated strategic summary from market response curves, contribution signals, and YoY movement.
-                    </p>
-                  </div>
-
-                  <div className="grid gap-3 xl:grid-cols-5">
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Brand</p>
-                      <p className="mt-1 text-base font-semibold text-dark-text">{aiModeData.selection.brand}</p>
-                    </div>
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">States Covered</p>
-                      <p className="mt-1 text-base font-semibold text-dark-text">{aiModeData.selection.markets_count}</p>
-                    </div>
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Positive YoY States</p>
-                      <p className="mt-1 text-base font-semibold text-dark-text">
-                        {aiModeData.portfolio_metrics?.positive_yoy_states ?? '-'}
-                      </p>
-                    </div>
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Average YoY</p>
-                      <p className={`mt-1 text-base font-semibold ${(aiModeData.portfolio_metrics?.avg_yoy_growth_pct ?? 0) >= 0 ? 'text-success' : 'text-danger'}`}>
-                        {formatSignedPct(aiModeData.portfolio_metrics?.avg_yoy_growth_pct, 2)}
-                      </p>
-                    </div>
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Engine</p>
-                      <p className="mt-1 text-sm font-semibold uppercase text-dark-text">{aiModeData.summary.provider}</p>
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-slate-200 bg-white p-4">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-primary">Signals Used For Trinity Report</p>
-                    <div className="mt-3 grid gap-3 xl:grid-cols-3">
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">YoY Signal</p>
-                        <p className="mt-1 text-sm text-slate-700">
-                          {aiModeData.signal_snapshot?.yoy?.latest_fiscal_year || '-'} |{' '}
-                          {formatSignedPct(aiModeData.signal_snapshot?.yoy?.latest_yoy_growth_pct, 2)}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-500">
-                          Volume: {formatRawNumber(aiModeData.signal_snapshot?.yoy?.latest_volume_mn)} Mn
-                        </p>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">S-Curve Signal</p>
-                        <p className="mt-1 text-xs text-slate-600">
-                          TV uplift band: {formatSignedPct(aiModeData.signal_snapshot?.s_curve?.tv_first_uplift_pct, 1)} to {formatSignedPct(aiModeData.signal_snapshot?.s_curve?.tv_last_uplift_pct, 1)}
-                        </p>
-                        <p className="mt-1 text-xs text-slate-600">
-                          Digital uplift band: {formatSignedPct(aiModeData.signal_snapshot?.s_curve?.dg_first_uplift_pct, 1)} to {formatSignedPct(aiModeData.signal_snapshot?.s_curve?.dg_last_uplift_pct, 1)}
-                        </p>
-                      </div>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Top Contribution Drivers</p>
-                        <div className="mt-1 space-y-1">
-                          {(aiModeData.signal_snapshot?.contribution_top ?? []).slice(0, 3).map((item, idx) => (
-                            <p key={`signal-driver-${idx}`} className="text-xs text-slate-700">
-                              {maskBrandInLabel(item.variable)}: {formatSignedPct(item.share_pct, 1)}
-                            </p>
-                          ))}
-                          {(aiModeData.signal_snapshot?.contribution_top ?? []).length === 0 ? (
-                            <p className="text-xs text-slate-500">No contribution context passed for this run.</p>
-                          ) : null}
+                  ) : null}
+                  {!investSummaryLoading && investSummary?.media_diagnosis ? (
+                    <div className="space-y-3">
+                      {/* Header */}
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <div className="rounded-lg bg-primary/10 p-1.5"><Sparkles className="h-3.5 w-3.5 text-primary" /></div>
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-primary">Media Investment Brief</p>
                         </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {structured ? (
-                    <>
-                      <div className="rounded-xl border border-slate-200 bg-white p-4">
-                        <p className="text-xs font-semibold uppercase tracking-wide text-primary">Executive Summary</p>
-                        <p className="mt-2 text-sm leading-relaxed text-slate-700">
-                          {summaryJson?.portfolio_takeaway || aiModeData.computed_executive_summary || structured.executive_summary || '-'}
-                        </p>
-                        <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">YoY Position</p>
-                        <p className="mt-2 text-sm leading-relaxed text-slate-700">{structured.portfolio_position}</p>
+                        {investSummary.provider === 'gemini'
+                          ? <span className="rounded-full border border-green-200 bg-green-50 px-2 py-0.5 text-[10px] font-semibold text-green-700">AI · Gemini</span>
+                          : <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500">Model-derived</span>}
                       </div>
 
-                      {(summaryJson?.risks?.length ?? 0) > 0 || (summaryJson?.evidence?.length ?? 0) > 0 ? (
-                        <div className="grid gap-3 xl:grid-cols-2">
-                          <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">Key Risks</p>
-                            <div className="mt-2 space-y-1.5">
-                              {(summaryJson?.risks ?? []).map((risk, idx) => (
-                                <p key={`risk-${idx}`} className="text-sm text-slate-700">{risk}</p>
-                              ))}
-                            </div>
-                          </div>
-                          <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                            <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Evidence</p>
-                            <div className="mt-2 space-y-1.5">
-                              {(summaryJson?.evidence ?? []).map((item, idx) => (
-                                <p key={`evidence-${idx}`} className="text-sm text-slate-700">{item}</p>
-                              ))}
-                            </div>
-                          </div>
+                      {/* Executive Summary */}
+                      {investSummary.executive_summary ? (
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Executive Summary</p>
+                          <p className="mt-1.5 text-sm leading-relaxed text-slate-700">{investSummary.executive_summary}</p>
                         </div>
                       ) : null}
 
-                      <div className="grid gap-3 xl:grid-cols-3">
-                        <div className="rounded-xl border border-success/35 bg-success/5 p-4">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-success">Champion States</p>
-                          <p className="mt-2 text-sm font-semibold text-dark-text">
-                            {aiModeData.state_clusters.growth_leaders.length
-                              ? aiModeData.state_clusters.growth_leaders.join(', ')
-                              : 'No clear champions identified'}
-                          </p>
-                        </div>
-                        <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Stable Core</p>
-                          <p className="mt-2 text-sm font-semibold text-dark-text">
-                            {aiModeData.state_clusters.stable_core.length
-                              ? aiModeData.state_clusters.stable_core.join(', ')
-                              : 'No stable-core states identified'}
-                          </p>
-                        </div>
-                        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">Laggard States</p>
-                          <p className="mt-2 text-sm font-semibold text-dark-text">
-                            {aiModeData.state_clusters.recovery_priority.length
-                              ? aiModeData.state_clusters.recovery_priority.join(', ')
-                              : 'No laggard states identified'}
-                          </p>
-                        </div>
-                      </div>
-
-                      {renderMediaInvestmentFramework()}
-
-                      <div className="grid gap-3 xl:grid-cols-2">
+                      {/* Diagnosis + Posture */}
+                      <div className="grid grid-cols-2 gap-3">
                         <div className="rounded-xl border border-slate-200 bg-white p-4">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-primary">TV Effectiveness</p>
-                          <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Working States</p>
-                          <p className="mt-1 text-sm text-slate-700">
-                            {aiModeData.channel_diagnostics?.tv.working_states?.length
-                              ? aiModeData.channel_diagnostics.tv.working_states.join(', ')
-                              : '-'}
-                          </p>
-                          <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Needs Attention</p>
-                          <p className="mt-1 text-sm text-slate-700">
-                            {aiModeData.channel_diagnostics?.tv.attention_states?.length
-                              ? aiModeData.channel_diagnostics.tv.attention_states.join(', ')
-                              : '-'}
-                          </p>
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Media Diagnosis</p>
+                          <p className="mt-2 text-sm leading-relaxed text-slate-700">{investSummary.media_diagnosis}</p>
                         </div>
-                        <div className="rounded-xl border border-slate-200 bg-white p-4">
-                          <p className="text-xs font-semibold uppercase tracking-wide text-primary">Digital Effectiveness</p>
-                          <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Working States</p>
-                          <p className="mt-1 text-sm text-slate-700">
-                            {aiModeData.channel_diagnostics?.digital.working_states?.length
-                              ? aiModeData.channel_diagnostics.digital.working_states.join(', ')
-                              : '-'}
-                          </p>
-                          <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Needs Attention</p>
-                          <p className="mt-1 text-sm text-slate-700">
-                            {aiModeData.channel_diagnostics?.digital.attention_states?.length
-                              ? aiModeData.channel_diagnostics.digital.attention_states.join(', ')
-                              : '-'}
-                          </p>
+                        <div className="rounded-xl border border-[#FFBD59]/40 bg-[#FFFBEB] p-4">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-[#B45309]">Investment Posture</p>
+                          <p className="mt-2 text-sm leading-relaxed text-[#92400E]">{investSummary.investment_posture}</p>
                         </div>
                       </div>
 
-                      <div className="grid gap-3 xl:grid-cols-2">
-                        {renderSummaryActionList('Where To Increase', 'positive', summaryJson?.increase_markets ?? [])}
-                        {renderSummaryActionList('Where To Protect / Rebalance', 'risk', summaryJson?.decrease_markets ?? [])}
-                      </div>
+                      {/* Market Archetypes */}
+                      {investSummary.market_archetypes ? (() => {
+                        const arc = investSummary.market_archetypes
+                        const cards = [
+                          { key: 'growth_champions', label: '★ Growth Champions', bg: 'bg-green-50', border: 'border-green-200', pill: 'bg-green-100 text-green-800', text: 'text-green-700', data: arc.growth_champions },
+                          { key: 'scale_up_core', label: '↑ Scale-up Core', bg: 'bg-emerald-50', border: 'border-emerald-200', pill: 'bg-emerald-100 text-emerald-800', text: 'text-emerald-700', data: arc.scale_up_core },
+                          { key: 'momentum_protect', label: '— Momentum Protect', bg: 'bg-amber-50', border: 'border-amber-200', pill: 'bg-amber-100 text-amber-800', text: 'text-amber-700', data: arc.momentum_protect },
+                          { key: 'emerging_bets', label: '◎ Emerging Bets', bg: 'bg-blue-50', border: 'border-blue-200', pill: 'bg-blue-100 text-blue-800', text: 'text-blue-700', data: arc.emerging_bets },
+                          { key: 'efficiency_laggards', label: '↓ Efficiency Laggards', bg: 'bg-red-50', border: 'border-red-200', pill: 'bg-red-100 text-red-700', text: 'text-red-700', data: arc.efficiency_laggards },
+                          { key: 'false_positive_growth', label: '⚠ False Positive Growth', bg: 'bg-orange-50', border: 'border-orange-200', pill: 'bg-orange-100 text-orange-800', text: 'text-orange-700', data: arc.false_positive_growth },
+                        ].filter((c) => c.data?.markets?.length > 0)
+                        return (
+                          <div>
+                            <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">Market Archetypes</p>
+                            <div className="grid grid-cols-3 gap-2">
+                              {cards.map((c) => (
+                                <div key={c.key} className={`rounded-xl border ${c.border} ${c.bg} p-3`}>
+                                  <p className={`text-[10px] font-bold uppercase tracking-wide ${c.text}`}>{c.label}</p>
+                                  <div className="mt-1.5 flex flex-wrap gap-1">
+                                    {c.data.markets.map((m: string) => (
+                                      <span key={m} className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-semibold ${c.pill}`}>{m}</span>
+                                    ))}
+                                  </div>
+                                  <p className={`mt-2 border-t pt-1.5 text-[11px] leading-relaxed ${c.text} border-current/20`}>{c.data.reason}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )
+                      })() : null}
 
-                    </>
-                  ) : (
-                    <div className="rounded-xl border border-slate-200 bg-white p-4">
-                      <p className="text-xs font-semibold uppercase tracking-wide text-primary">Trinity Narrative</p>
-                      <pre className="mt-3 whitespace-pre-wrap font-sans text-sm leading-relaxed text-slate-700">{aiModeData.ai_brief}</pre>
-                    </div>
-                  )}
-
-                  <div className="rounded-xl border border-slate-200 bg-white p-4">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">State Signal Table</p>
-                    <div className="mt-2 overflow-x-auto rounded-lg border border-slate-200">
-                      <table className="min-w-full divide-y divide-slate-200 text-sm">
-                        <thead className="bg-slate-50 text-slate-600">
-                          <tr>
-                            <th className="px-3 py-2 text-left">State</th>
-                            <th className="px-3 py-2 text-right">YoY %</th>
-                            <th className="px-3 py-2 text-right">Salience %</th>
-                            <th className="px-3 py-2 text-right">Brand Share %</th>
-                            <th className="px-3 py-2 text-left">Leader Position</th>
-                            <th className="px-3 py-2 text-right">TV Eff %</th>
-                            <th className="px-3 py-2 text-right">Digital Eff %</th>
-                            <th className="px-3 py-2 text-right">Responsiveness %</th>
-                            <th className="px-3 py-2 text-left">Quadrant</th>
-                            <th className="px-3 py-2 text-left">Action</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 bg-white text-slate-700">
-                          {aiModeData.market_cards.map((row) => (
-                            <tr key={`ai-state-row-${row.market}`}>
-                              <td className="px-3 py-2.5 font-semibold text-dark-text">{row.market}</td>
-                              <td className={`px-3 py-2.5 text-right font-semibold ${row.yoy_growth_pct >= 0 ? 'text-success' : 'text-danger'}`}>
-                                {formatSignedPct(row.yoy_growth_pct)}
-                              </td>
-                              <td className="px-3 py-2.5 text-right">{formatPct(row.category_salience_pct)}</td>
-                              <td className="px-3 py-2.5 text-right">{formatPct(row.brand_market_share_pct)}</td>
-                              <td className="px-3 py-2.5 text-xs">{row.leader_position ?? '-'}</td>
-                              <td className="px-3 py-2.5 text-right">{formatPct(row.tv_effectiveness_pct)}</td>
-                              <td className="px-3 py-2.5 text-right">{formatPct(row.digital_effectiveness_pct)}</td>
-                              <td className="px-3 py-2.5 text-right">{formatPct(row.media_responsiveness_pct)}</td>
-                              <td className="px-3 py-2.5 text-xs">{row.investment_quadrant?.replaceAll('_', ' ') ?? '-'}</td>
-                              <td className="px-3 py-2.5 text-xs text-slate-700">{row.recommendation_action}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-
-                  {userFacingNotes.length > 0 ? (
-                    <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                      {userFacingNotes.join(' ')}
+                      {/* Budget Action */}
+                      {investSummary.budget_action ? (
+                        <div className="rounded-xl border border-primary/20 bg-primary/5 p-4">
+                          <p className="text-[10px] font-bold uppercase tracking-widest text-primary">Budget Move</p>
+                          <p className="mt-1.5 text-sm font-medium text-slate-700">{investSummary.budget_action.budget_move}</p>
+                          <div className="mt-3 flex flex-wrap gap-3 text-[11px]">
+                            {investSummary.budget_action.increase?.length > 0 && <span><span className="font-bold text-green-700">↑ Increase:</span> <span className="text-slate-600">{investSummary.budget_action.increase.join(', ')}</span></span>}
+                            {investSummary.budget_action.hold?.length > 0 && <span><span className="font-bold text-amber-700">— Hold:</span> <span className="text-slate-600">{investSummary.budget_action.hold.join(', ')}</span></span>}
+                            {investSummary.budget_action.test?.length > 0 && <span><span className="font-bold text-blue-700">◎ Test:</span> <span className="text-slate-600">{investSummary.budget_action.test.join(', ')}</span></span>}
+                            {investSummary.budget_action.reduce?.length > 0 && <span><span className="font-bold text-red-700">↓ Reduce:</span> <span className="text-slate-600">{investSummary.budget_action.reduce.join(', ')}</span></span>}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
                   ) : null}
+
+                  {/* Investment Framework Grid */}
+                  <InvestmentFrameworkChart data={frameworkData} displayBrandName={displayBrand(aiModeBrand)} />
+
+                  {/* India Map */}
+                  <IndiaMapChart
+                    markets={frameworkData.markets}
+                    onMarketClick={TRINITY_TREND_BRANDS.has(aiModeBrand) ? (market) => void openTrinityTrendModal(market.market) : undefined}
+                  />
                 </div>
               ) : null}
             </section>
           </div>
+          {renderTrinityTrendModal()}
         </div>
       </div>
     )
