@@ -1387,7 +1387,7 @@ function App() {
       const A4_H_MM = 297
       const slotH = A4_H_MM - headerH - footerH - margin  // ~265mm
 
-      const drawHeader = (pdf: InstanceType<typeof jsPDF>, pageW: number) => {
+      const drawHeader = (pdf: any, pageW: number) => {
         pdf.setFillColor(37, 99, 235)
         pdf.rect(0, 0, pageW, headerH, 'F')
         pdf.setFont('helvetica', 'bold')
@@ -1399,7 +1399,7 @@ function App() {
         pdf.text('Trinity Mode', pageW - margin, 9, { align: 'right' })
       }
 
-      const drawFooter = (pdf: InstanceType<typeof jsPDF>, pageW: number, pageH: number, p: number, total: number) => {
+      const drawFooter = (pdf: any, pageW: number, pageH: number, p: number, total: number) => {
         pdf.setFont('helvetica', 'normal')
         pdf.setFontSize(7)
         pdf.setTextColor(150, 150, 150)
