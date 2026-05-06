@@ -1450,8 +1450,6 @@ function App() {
         pdf.save(`Trinity_Report_${safeName}.pdf`)
       }
 
-      const safeName = displayBrand(aiModeBrand).replace(/\s+/g, '_')
-      pdf.save(`Trinity_Report_${safeName}.pdf`)
     } finally {
       setTrinityPdfLoading(false)
     }
