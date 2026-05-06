@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import concurrent.futures
 import hashlib
@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
 def _read_env_file_key(key: str) -> str:
-    """Read a key directly from the .env file — bypasses system env var conflicts."""
+    """Read a key directly from the .env file â€” bypasses system env var conflicts."""
     env_path = Path(__file__).resolve().parents[2] / ".env"
     try:
         for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -1904,7 +1904,7 @@ def _build_fast_seed_vector(
         dg_probe = min(max(0.12, min(0.3, dg_hi)), dg_hi) if increasing_budget else max(min(-0.12, max(-0.3, dg_lo)), dg_lo)
 
         # Use TV/Digital elasticity ratio from the India-level file to guide within-market split.
-        # For increasing budgets: allocate proportional to elasticity (higher elasticity → more spend).
+        # For increasing budgets: allocate proportional to elasticity (higher elasticity â†’ more spend).
         # For decreasing budgets: protect the more elastic channel (cut proportional to the other's elasticity).
         el_row = (elasticity_map or {}).get(region, {})
         tv_el = float(_finite(el_row.get("tv_reach_elasticity", 0.0), 0.0)) if el_row else 0.0
@@ -6902,7 +6902,7 @@ def _generate_market_action_explanation(
             if cpr_band == "high_cost":
                 cpr_val = row.get("avg_cpr")
                 if cpr_val:
-                    reasons.append(f"high CPR (₹{cpr_val:.0f})")
+                    reasons.append(f"high CPR (â‚¹{cpr_val:.0f})")
         
         # Check for elasticity condition
         if any(phrase in prompt_lower for phrase in ["low elasticity", "weak elasticity"]):
@@ -8934,7 +8934,7 @@ def service_brand_allocation(payload: BrandAllocationRequest) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Investment Framework (2x2 salience × elasticity grid)
+# Investment Framework (2x2 salience Ã— elasticity grid)
 # ---------------------------------------------------------------------------
 
 _SALIENCE_FILE = BASE_DIR / "Data for MMM AI.xlsx"
@@ -8949,7 +8949,7 @@ _SALIENCE_SHEET_MAP: dict[str, str] = {
     "aerspray": "Aer Spray",
 }
 
-# National level learnings — brand name as it appears in the sheet → row label
+# National level learnings â€” brand name as it appears in the sheet â†’ row label
 _NATIONAL_BRAND_MAP: dict[str, str] = {
     "aer pp": "Aer Power Pocket",
     "aerpp": "Aer Power Pocket",
@@ -8959,11 +8959,11 @@ _NATIONAL_BRAND_MAP: dict[str, str] = {
 }
 
 _BRAND_DISPLAY_MAP: dict[str, str] = {
-    "Aer Matic": "Lumière Noir",
+    "Aer Matic": "LumiÃ¨re Noir",
     "Aer O": "Velvet Bloom",
     "Aer PP": "Cedar Mist",
     "Aer Spray": "Amber Dusk",
-    "Godrej Expert Rich Crème": "Rosé Élite",
+    "Godrej Expert Rich CrÃ¨me": "RosÃ© Ã‰lite",
     "Godrej Shampoo Hair Color": "Oud Royale",
 }
 
@@ -8998,16 +8998,16 @@ def _find_investment_sheet(brand: str, sheet_names: list[str], is_salience: bool
             if k in brand_norm or k == brand_key:
                 if v in sheet_names:
                     return v
-        # GERC / Godrej Expert Rich Crème
-        if "godrej" in brand_norm and ("rich" in brand_norm or "crème" in brand_norm or "creme" in brand_norm):
+        # GERC / Godrej Expert Rich CrÃ¨me
+        if "godrej" in brand_norm and ("rich" in brand_norm or "crÃ¨me" in brand_norm or "creme" in brand_norm):
             for s in sheet_names:
                 if s.upper() == "GERC":
                     return s
     else:
         # Elasticity file uses real brand names as sheet names
         for s in sheet_names:
-            s_norm = s.lower().strip().replace("è", "e").replace("é", "e").replace("ê", "e")
-            b_norm = brand_norm.replace("è", "e").replace("é", "e").replace("ê", "e")
+            s_norm = s.lower().strip().replace("Ã¨", "e").replace("Ã©", "e").replace("Ãª", "e")
+            b_norm = brand_norm.replace("Ã¨", "e").replace("Ã©", "e").replace("Ãª", "e")
             if s_norm == b_norm or s_norm.replace(" ", "") == b_norm.replace(" ", ""):
                 return s
 
@@ -9049,7 +9049,7 @@ def service_investment_framework(brand: str) -> dict:
     if merged.empty:
         return {"status": "no_data", "brand": brand, "markets": [], "thresholds": {}}
 
-    sal_col = "Brand salience"
+    sal_col = "Category salience"
     el_col = "Overall media elasticity"
 
     sal_median = float(merged[sal_col].median())
@@ -9175,49 +9175,71 @@ def _investment_summary_fallback(brand: str, national_elasticity: float | None, 
     display = _BRAND_DISPLAY_MAP.get(brand, brand)
     el = national_elasticity
     level = "high" if el is not None and el >= 0.4 else ("moderate" if el is not None and el >= 0.15 else "low")
-    el_str = f"{el:.2f} ({level})" if el is not None else "not available"
 
     by_q: dict[str, list[dict]] = {"increase": [], "maintain_salience": [], "scale_back": [], "maintain_elasticity": []}
     for m in markets:
         by_q.get(m.get("quadrant", ""), []).append(m)
 
     inc = sorted(by_q["increase"], key=lambda m: m.get("category_salience", 0), reverse=True)
-    red = sorted(by_q["scale_back"], key=lambda m: m.get("category_salience", 0) + m.get("overall_media_elasticity", 0))
     prot = sorted(by_q["maintain_salience"], key=lambda m: m.get("category_salience", 0), reverse=True)
-    test = sorted(by_q["maintain_elasticity"], key=lambda m: m.get("category_salience", 0), reverse=True)
-
-    primary = [_display_market(m["market"]) for m in inc[:3]]
-    secondary = [_display_market(m["market"]) for m in inc[3:]]
-    reduce_mkts = [_display_market(m["market"]) for m in red]
-    prot_mkts = [_display_market(m["market"]) for m in prot]
-    test_mkts = [_display_market(m["market"]) for m in test]
-
-    false_pos = [_display_market(m["market"]) for m in red if (m.get("yoy_pct") or 0) >= 30]
+    primary = [_display_market(m["market"]) for m in inc[:2]]
+    protect = _display_market(prot[0]["market"]) if prot else "high-salience markets"
 
     return {
         "executive_summary": (
-            f"{display} shows {level} national media responsiveness, with {len(inc)} markets primed for scale-up. "
-            f"Concentrate investment in {', '.join(primary[:2])} and protect {prot_mkts[0] if prot_mkts else 'base markets'}."
+            f"- {display} shows {level} national media responsiveness; scale {', '.join(primary) if primary else 'the high-salience markets'} first.\n"
+            f"- Protect {protect} rather than aggressively scaling it because salience is stronger than media response.\n"
+            "- Use the 2x2 grid to separate scale-up, protect, selective-test, and scale-back markets."
         ),
-        "media_diagnosis": f"{display} shows {el_str} national media responsiveness, with {len(inc)} markets offering clear scale-up potential.",
-        "investment_posture": f"Scale {', '.join(primary)} while protecting {', '.join(prot_mkts)} and reducing {', '.join(reduce_mkts[:2])}.",
-        "market_archetypes": {
-            "growth_champions": {"markets": primary[:2], "reason": f"{', '.join(primary[:2])} combine strong category salience with high media elasticity and positive YoY."},
-            "scale_up_core": {"markets": primary[2:] + secondary[:2], "reason": "These markets have strong salience-elasticity fundamentals warranting increased investment."},
-            "momentum_protect": {"markets": prot_mkts, "reason": f"{', '.join(prot_mkts)} have strong category scale but moderate elasticity — protect, do not aggressively scale."},
-            "emerging_bets": {"markets": test_mkts, "reason": "Lower salience but good elasticity — merit selective testing rather than full scale-up."},
-            "efficiency_laggards": {"markets": [m for m in reduce_mkts if m not in false_pos], "reason": "Weak salience and elasticity make incremental spend inefficient in these markets."},
-            "false_positive_growth": {"markets": false_pos, "reason": "Strong YoY but weak salience and elasticity — growth is likely non-media-led and should not trigger scale-up."},
-        },
-        "budget_action": {
-            "increase": primary,
-            "hold": prot_mkts,
-            "test": test_mkts,
-            "reduce": reduce_mkts,
-            "budget_move": f"Shift incremental budget from {', '.join(reduce_mkts[:3])} into {', '.join(primary)}{(' and a controlled ' + secondary[0] + ' test') if secondary else ''}."
+        "quadrant_notes": {
+            "increase": "High category salience and high media elasticity make these the strongest scale candidates.",
+            "maintain_salience": "These markets have category scale, but weaker media response means protection is safer than aggressive scaling.",
+            "maintain_elasticity": "Media response is promising, but category salience is lower, so controlled testing is more appropriate.",
+            "scale_back": "Low category salience and weak elasticity make incremental media less efficient here.",
         },
         "provider": "deterministic",
     }
+
+
+def _load_gemini_json_text(text: str) -> dict:
+    if not text:
+        return {}
+    # Pass 1: direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # Pass 2: strip trailing commas before } or ] (common Gemini mistake)
+    cleaned = re.sub(r",\s*([}\]])", r"\1", text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    # Pass 3: fix unescaped newlines inside strings
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in cleaned:
+        if escaped:
+            repaired.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            repaired.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            repaired.append(ch)
+            continue
+        if in_string and ch in {"\n", "\r"}:
+            repaired.append("\\n")
+            continue
+        repaired.append(ch)
+    repaired_text = "".join(repaired)
+    # Pass 4: strip trailing commas again after newline repair
+    repaired_text = re.sub(r",\s*([}\]])", r"\1", repaired_text)
+    return json.loads(repaired_text) if repaired_text else {}
 
 
 def service_investment_summary(payload: InvestmentSummaryRequest) -> dict:
@@ -9236,7 +9258,7 @@ def service_investment_summary(payload: InvestmentSummaryRequest) -> dict:
         for m in sorted(mlist, key=lambda x: x.get("category_salience", 0), reverse=True):
             yoy = m.get("yoy_pct")
             yoy_str = f", YoY {'+' if yoy and yoy >= 0 else ''}{yoy}%" if yoy is not None else ""
-            lines.append(f"- {_display_market(m['market'])}: salience {round(m.get('category_salience',0)*100,1)}%, elasticity {m.get('overall_media_elasticity',0)}{yoy_str}")
+            lines.append(f"- {_display_market(m['market'])}: salience {round(m.get('category_salience',0)*100,1)}%, elasticity {float(m.get('overall_media_elasticity',0)):.2f}{yoy_str}")
         return "\n".join(lines) if lines else "- none"
 
     top3 = sorted(markets, key=lambda m: m.get("category_salience", 0), reverse=True)[:3]
@@ -9247,21 +9269,26 @@ def service_investment_summary(payload: InvestmentSummaryRequest) -> dict:
     top3_str = "\n".join(_top3_line(m) for m in top3)
 
     el = national_elasticity
-    el_str = f"{el:.3f}" if el is not None else "N/A"
+    el_str = f"{el:.2f}" if el is not None else "N/A"
     el_interp = (
         "High media-led growth potential at national level." if el is not None and el >= 0.4
-        else ("Moderate responsiveness — selective investment warranted." if el is not None and el >= 0.15
-              else "Low responsiveness — media investment must be highly targeted.")
+        else ("Moderate responsiveness â€” selective investment warranted." if el is not None and el >= 0.15
+              else "Low responsiveness â€” media investment must be highly targeted.")
     )
 
     increase_sorted = sorted(by_q["increase"], key=lambda m: m.get("category_salience", 0), reverse=True)
     primary_guidance = ", ".join(_display_market(m["market"]) for m in increase_sorted[:3])
     secondary_guidance = _display_market(increase_sorted[3]["market"]) if len(increase_sorted) > 3 else ""
     protect_market = _display_market(by_q["maintain_salience"][0]["market"]) if by_q["maintain_salience"] else "high-salience markets"
+    test_markets = ", ".join(
+        _display_market(m["market"])
+        for m in sorted(by_q["maintain_elasticity"], key=lambda m: m.get("overall_media_elasticity", 0), reverse=True)[:2]
+    )
 
     # Identify clearest reduction market (lowest salience + lowest elasticity)
     scale_sorted = sorted(by_q["scale_back"], key=lambda m: m.get("category_salience", 0) + m.get("overall_media_elasticity", 0))
     clearest_cut = _display_market(scale_sorted[0]["market"]) if scale_sorted else ""
+    reduce_markets = ", ".join(_display_market(m["market"]) for m in scale_sorted[:3])
 
     # False positive candidates: REDUCE markets with strong YoY
     false_pos = [_display_market(m["market"]) for m in by_q["scale_back"] if (m.get("yoy_pct") or 0) >= 30]
@@ -9269,6 +9296,7 @@ def service_investment_summary(payload: InvestmentSummaryRequest) -> dict:
     prompt = f"""You are a senior media investment strategist preparing an executive briefing.
 
 Use only the data provided. Return valid JSON only. Do not use markdown. Do not explain the methodology. Do not mention median split.
+The executive_summary must be one JSON string containing exactly 3 bullet points separated by escaped newline characters (\\n). Each bullet must start with "- ". Do not put raw line breaks inside any JSON string.
 
 Objective:
 Convert market-level category salience, media elasticity, and YoY growth into a clear media investment decision.
@@ -9288,33 +9316,27 @@ Strategic rules:
 - Weak or negative YoY in a low-salience, low-elasticity market reinforces reduction.
 - If YoY is strong but both salience and elasticity are weak, classify as false-positive growth or non-media-led momentum.
 - Avoid generic language like "optimize strategy", "drive growth", or "unlock potential".
-- Name specific markets in every relevant field.
+- Do not write generic summaries like "increase media in high-salience markets"; name the exact markets.
+- Name the brand and specific markets in every executive_summary line except where impossible.
 - Keep every reason concise and executive-friendly.
 
-Market archetype definitions:
-- growth_champions: Markets with strong salience, strong elasticity, and strong YoY momentum.
-- scale_up_core: Markets with high salience and high elasticity, even if YoY is moderate.
-- momentum_protect: Markets with high salience and/or strong YoY but weaker media elasticity.
-- emerging_bets: Markets with lower salience but good elasticity and positive YoY.
-- efficiency_laggards: Markets with low salience, low elasticity, and weak or negative YoY.
-- false_positive_growth: Markets with strong YoY but weak salience and weak elasticity — growth may not be media-efficient.
 
 Brand: {display}
 
 National media elasticity: {el_str}
 Interpretation: {el_interp}
-All India YoY volume growth (FY24 → FY25): {f"{'+' if national_yoy and national_yoy >= 0 else ''}{national_yoy}%" if national_yoy is not None else "not available"}
+All India YoY volume growth (FY24 â†’ FY25): {f"{'+' if national_yoy and national_yoy >= 0 else ''}{national_yoy}%" if national_yoy is not None else "not available"}
 
-INCREASE MEDIA — High Salience + High Elasticity:
+INCREASE MEDIA â€” High Salience + High Elasticity:
 {_fmt(by_q['increase'])}
 
-HOLD / PROTECT — High Salience + Low Elasticity:
+HOLD / PROTECT â€” High Salience + Low Elasticity:
 {_fmt(by_q['maintain_salience'])}
 
-REDUCE — Low Salience + Low Elasticity:
+REDUCE â€” Low Salience + Low Elasticity:
 {_fmt(by_q['scale_back'])}
 
-SELECTIVE HOLD / TEST — Low Salience + High Elasticity:
+SELECTIVE HOLD / TEST â€” Low Salience + High Elasticity:
 {_fmt(by_q['maintain_elasticity'])}
 
 Top salience markets:
@@ -9324,48 +9346,25 @@ Priority guidance:
 - For immediate scale-up, prioritize {primary_guidance}.
 {f'- Treat {secondary_guidance} as a high-response secondary opportunity.' if secondary_guidance else ''}
 - Protect {protect_market} because of category scale and strong YoY but only moderate media elasticity.
-- Do not over-prioritize {', '.join(false_pos)} despite strong YoY — salience and elasticity are weak.
+- Do not over-prioritize {', '.join(false_pos)} despite strong YoY â€” salience and elasticity are weak.
 {f'- {clearest_cut} is the clearest reduction market: low salience, weak elasticity, and weakest YoY.' if clearest_cut else ''}
 
-Return exactly this JSON structure:
+Executive summary must follow this exact 3-bullet content plan:
+Bullet 1: mention {display}, national media elasticity {el_str}, All India YoY {national_yoy if national_yoy is not None else "not available"}, and the overall scale-up implication.
+Bullet 2: say to scale {primary_guidance or "the increase-media markets"} because they combine category salience and elasticity.
+Bullet 3: say to protect {protect_market}, selectively test {test_markets or "the low-salience high-elasticity markets"}, and reduce/deprioritize {reduce_markets or "low-salience low-elasticity markets"}.
+
+Return exactly this JSON structure. Do not return market_archetypes, budget_action, media_diagnosis, or investment_posture.
 {{
-  "media_diagnosis": "Start with the All India YoY volume growth figure, then state national media elasticity level. Max 28 words.",
-  "investment_posture": "One sentence explaining the overall budget stance. Max 32 words.",
-  "market_archetypes": {{
-    "growth_champions": {{
-      "markets": [],
-      "reason": "One sentence."
-    }},
-    "scale_up_core": {{
-      "markets": [],
-      "reason": "One sentence."
-    }},
-    "momentum_protect": {{
-      "markets": [],
-      "reason": "One sentence."
-    }},
-    "emerging_bets": {{
-      "markets": [],
-      "reason": "One sentence."
-    }},
-    "efficiency_laggards": {{
-      "markets": [],
-      "reason": "One sentence."
-    }},
-    "false_positive_growth": {{
-      "markets": [],
-      "reason": "One sentence."
-    }}
-  }},
-  "budget_action": {{
-    "increase": [],
-    "hold": [],
-    "reduce": [],
-    "test": [],
-    "budget_move": "One direct sentence — from where, to where."
-  }},
-  "executive_summary": "Two concise sentences summarizing the final decision."
-}}"""
+  "executive_summary": "- Bullet 1 with brand, national elasticity, YoY, and implication.\\n- Bullet 2 with exact scale markets and reason.\\n- Bullet 3 with exact protect, test, and reduce markets.",
+  "quadrant_notes": {{
+    "increase": "One concise sentence for high salience + high elasticity.",
+    "maintain_salience": "One concise sentence for high salience + low elasticity.",
+    "maintain_elasticity": "One concise sentence for low salience + high elasticity.",
+    "scale_back": "One concise sentence for low salience + low elasticity."
+}}
+}}
+"""
 
     api_key = _get_gemini_key()
     if not api_key:
@@ -9373,17 +9372,44 @@ Return exactly this JSON structure:
 
     model = _get_gemini_model()
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    response_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "executive_summary": {"type": "STRING"},
+            "quadrant_notes": {
+                "type": "OBJECT",
+                "properties": {
+                    "increase": {"type": "STRING"},
+                    "maintain_salience": {"type": "STRING"},
+                    "maintain_elasticity": {"type": "STRING"},
+                    "scale_back": {"type": "STRING"},
+                },
+                "required": ["increase", "maintain_salience", "maintain_elasticity", "scale_back"],
+            },
+        },
+        "required": ["executive_summary", "quadrant_notes"],
+    }
     body = {
-        "generationConfig": {"temperature": 0.3, "topP": 0.9, "maxOutputTokens": 4096, "responseMimeType": "application/json"},
+        "generationConfig": {
+            "temperature": 0.1,
+            "topP": 0.8,
+            "maxOutputTokens": 4096,
+            "responseMimeType": "application/json",
+            "responseSchema": response_schema,
+        },
         "contents": [{"parts": [{"text": prompt}]}],
     }
     req = urlrequest.Request(url, data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urlrequest.urlopen(req, timeout=30) as resp:
             raw = resp.read().decode("utf-8")
-        parsed = json.loads(raw)
+        # Outer envelope parse — strip trailing commas first in case Gemini returns dirty JSON
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = json.loads(re.sub(r",\s*([}\]])", r"\1", raw))
         parts = parsed.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-        text = str(parts[0].get("text", "")).strip() if parts else ""
+        text = "".join(str(part.get("text", "")) for part in parts).strip() if parts else ""
         # Strip markdown code fences if present
         text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
         text = re.sub(r"\s*```$", "", text, flags=re.MULTILINE)
@@ -9391,8 +9417,33 @@ Return exactly this JSON structure:
         # Extract JSON object if there's surrounding text
         match = re.search(r"\{[\s\S]*\}", text)
         text = match.group(0) if match else text
-        result = json.loads(text) if text else {}
-        return {**result, "provider": "gemini"}
+        try:
+            result = _load_gemini_json_text(text)
+        except json.JSONDecodeError as parse_exc:
+            print(f"[investment-summary] JSON parse failed after all repair attempts. exc={parse_exc}; text={text[:2000]!r}", flush=True)
+            raise
+        fallback = _investment_summary_fallback(brand, national_elasticity, markets)
+        notes = result.get("quadrant_notes") if isinstance(result.get("quadrant_notes"), dict) else {}
+        summary = str(result.get("executive_summary") or "").replace("\\n", "\n").strip()
+        summary_l = summary.lower()
+        summary_lines = [line.strip() for line in summary.splitlines() if line.strip()]
+        if len(summary_lines) == 3:
+            summary = "\n".join(line if line.startswith("- ") else f"- {line.lstrip('- ').strip()}" for line in summary_lines)
+            summary_l = summary.lower()
+        named_market_count = sum(1 for m in markets if _display_market(str(m.get("market", ""))).lower() in summary_l)
+        generic_summary = (
+            not summary
+            or display.lower() not in summary_l
+            or len(summary_lines) != 3
+            or named_market_count < 2
+            or "high-salience, high-elasticity markets" in summary_l
+            or "low-efficiency areas" in summary_l
+        )
+        return {
+            "executive_summary": fallback["executive_summary"] if generic_summary else summary,
+            "quadrant_notes": {**fallback["quadrant_notes"], **notes},
+            "provider": "gemini",
+        }
     except Exception as _exc:
         import traceback as _tb
         print(f"[investment-summary] Gemini error: {_tb.format_exc()}", flush=True)

@@ -28,6 +28,8 @@ export interface InvestmentFrameworkData {
 interface Props {
   data: InvestmentFrameworkData
   displayBrandName: string
+  quadrantNotes?: Partial<Record<FrameworkMarket['quadrant'], string>>
+  onMarketClick?: (market: FrameworkMarket) => void
 }
 
 const Q = {
@@ -55,7 +57,7 @@ const Q = {
     accent: '#41C185',
     label: 'INCREASE MEDIA',
     position: 'High Salience · High Elasticity',
-    description: 'Increase investments up to maximum level of impact to fuel brand growth.',
+    description: 'Increase investments up to maximum level of impact to fuel category growth.',
     icon: ArrowUpRight,
     iconColor: '#166534',
     row: 0,
@@ -102,17 +104,15 @@ const DISPLAY: Record<string, string> = {
   'Andhra-Telangana': 'Andhra-Telangana',
 }
 
-export function InvestmentFrameworkChart({ data, displayBrandName }: Props) {
-  const { markets, thresholds } = data
+export function InvestmentFrameworkChart({ data, displayBrandName, quadrantNotes, onMarketClick }: Props) {
+  const { markets } = data
 
   const byQuadrant = Object.fromEntries(
     (Object.keys(Q) as QuadrantKey[]).map((k) => [
       k,
-      [...markets.filter((m) => m.quadrant === k)].sort((a, b) => b.brand_salience - a.brand_salience),
+      [...markets.filter((m) => m.quadrant === k)].sort((a, b) => b.category_salience - a.category_salience),
     ])
   ) as Record<QuadrantKey, FrameworkMarket[]>
-
-  const elMax = thresholds.elasticity_max
 
   const quadrantOrder: QuadrantKey[][] = [
     ['maintain_salience', 'increase'],
@@ -121,9 +121,41 @@ export function InvestmentFrameworkChart({ data, displayBrandName }: Props) {
 
   return (
     <div className="space-y-5" aria-label={`${displayBrandName} investment framework`}>
-      {/* 2×2 grid */}
-      <div className="grid grid-cols-2 gap-3">
-        {quadrantOrder.flat().map((qKey) => {
+
+      {/* Axis labels row — Elasticity (X-axis) */}
+      <div className="hidden md:flex items-center gap-2 px-1">
+        <div className="flex flex-1 items-center gap-2">
+          <div className="h-px flex-1 bg-slate-300" />
+          <span className="whitespace-nowrap rounded-full border border-slate-300 bg-white px-3 py-0.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+            ← Low Elasticity
+          </span>
+          <div className="w-4 text-center text-slate-300 text-xs">|</div>
+          <span className="whitespace-nowrap rounded-full border border-slate-300 bg-white px-3 py-0.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+            High Elasticity →
+          </span>
+          <div className="h-px flex-1 bg-slate-300" />
+        </div>
+      </div>
+
+      {/* 2×2 grid with Y-axis label */}
+      <div className="flex gap-0">
+        {/* Y-axis: one label per row */}
+        <div className="hidden md:flex w-24 flex-shrink-0 flex-col gap-3 pr-2">
+          <div className="flex flex-1 items-center justify-end">
+            <span className="whitespace-nowrap rounded-full border border-slate-300 bg-white px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+              ↑ High Sal
+            </span>
+          </div>
+          <div className="flex flex-1 items-center justify-end">
+            <span className="whitespace-nowrap rounded-full border border-slate-300 bg-white px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+              ↓ Low Sal
+            </span>
+          </div>
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="grid grid-cols-2 gap-3">
+          {quadrantOrder.flat().map((qKey) => {
           const cfg = Q[qKey]
           const Icon = cfg.icon
           const mktList = byQuadrant[qKey] ?? []
@@ -165,45 +197,50 @@ export function InvestmentFrameworkChart({ data, displayBrandName }: Props) {
                   <span className="text-[11px] text-slate-400 italic">No markets in this quadrant</span>
                 ) : (
                   mktList.map((m) => {
-                    const salPct = Math.round(m.brand_salience * 100)
-                    const elPct = Math.round((m.overall_media_elasticity / elMax) * 100)
+                    const salValue = m.category_salience.toFixed(2)
+                    const elPct = m.overall_media_elasticity.toFixed(2)
                     const name = DISPLAY[m.market] ?? m.market
-                    const yoy = m.yoy_pct
                     return (
-                      <div
+                      <button
+                        type="button"
                         key={m.market}
-                        className="flex items-center gap-2 rounded-lg border px-2.5 py-1.5"
+                        onClick={() => onMarketClick?.(m)}
+                        className={`flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-left transition ${onMarketClick ? 'hover:brightness-95 focus:outline-none focus:ring-2 focus:ring-blue-200' : ''}`}
                         style={{ background: cfg.pillBg, borderColor: cfg.pillBorder }}
                       >
                         <span className="text-[12px] font-semibold" style={{ color: cfg.pillText }}>
                           {name}
                         </span>
-                        <span className="flex gap-1 text-[10px] font-medium text-slate-400">
-                          <span title="Brand Salience">S {salPct}%</span>
-                          <span>·</span>
-                          <span title="Media Elasticity">E {elPct}%</span>
-                          {yoy != null && (
-                            <>
-                              <span>·</span>
-                              <span title="YoY Volume Growth FY24→FY25" className="font-semibold" style={{ color: yoy >= 0 ? '#16a34a' : '#dc2626' }}>
-                                {yoy >= 0 ? '+' : ''}{yoy}%
-                              </span>
-                            </>
-                          )}
+                        <span className="flex gap-1 text-[10px] font-extrabold" style={{ color: cfg.iconColor }}>
+                          <span title="Category Salience">S {salValue}</span>
+                          <span className="opacity-50">·</span>
+                          <span title="Media Elasticity">E {elPct}</span>
                         </span>
-                      </div>
+                      </button>
                     )
                   })
                 )}
               </div>
+
+              {quadrantNotes?.[qKey] ? (
+                <p
+                  className="mt-3 rounded-lg border px-3 py-2 text-[11px] leading-relaxed"
+                  style={{ borderColor: cfg.pillBorder, background: '#FFFFFF99', color: cfg.pillText }}
+                >
+                  {quadrantNotes[qKey]}
+                </p>
+              ) : null}
             </div>
           )
-        })}
+          })}
+          </div>
+        </div>
       </div>
 
       {/* Footer note */}
+
       <p className="text-center text-[11px] text-slate-400">
-        S = Brand Salience · E = Media Elasticity relative to max · Split at median of each dimension
+        S = Category Salience · E = Media Elasticity · Split at median of each dimension
       </p>
     </div>
   )

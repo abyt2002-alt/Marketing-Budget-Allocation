@@ -39,7 +39,7 @@ import {
 } from './saved/SavedItemsStore'
 import { BudgetAllocationDebugPage } from './components/BudgetAllocationDebugPage'
 import { InvestmentFrameworkChart } from './components/InvestmentFrameworkChart'
-import type { InvestmentFrameworkData } from './components/InvestmentFrameworkChart'
+import type { FrameworkMarket, InvestmentFrameworkData } from './components/InvestmentFrameworkChart'
 import { IndiaMapChart } from './components/IndiaMapChart'
 
 const TRINITY_TREND_BRANDS = new Set([
@@ -520,6 +520,16 @@ type SCurvesResponse = {
   }
 }
 
+type MarketSignalRow = {
+  market: string
+  market_share: number | null
+  change_in_market_share: number | null
+  change_in_brand_equity: number | null
+  category_salience: number | null
+  brand_salience: number | null
+  responsiveness_label: string
+}
+
 type ContributionItem = {
   variable: string
   label: string
@@ -947,7 +957,7 @@ function App() {
   const [scenarioIntentPartial, setScenarioIntentPartial] = useState<ScenarioResolvedIntent | null>(null)
   const [scenarioIntentConfirmationRequired, setScenarioIntentConfirmationRequired] = useState(false)
   const [scenarioIntentNotes, setScenarioIntentNotes] = useState<string[]>([])
-  const [marketSignalRows, setMarketSignalRows] = useState<Array<{market:string,market_share:number|null,change_in_market_share:number|null,change_in_brand_equity:number|null,category_salience:number|null,brand_salience:number|null,responsiveness_label:string}>>([])
+  const [marketSignalRows, setMarketSignalRows] = useState<MarketSignalRow[]>([])
   const [showMarketSignals, setShowMarketSignals] = useState(true)
   const [scenarioJobId, setScenarioJobId] = useState('')
   const [scenarioStatus, setScenarioStatus] = useState<'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'expired'>('idle')
@@ -995,18 +1005,8 @@ function App() {
   const [frameworkData, setFrameworkData] = useState<InvestmentFrameworkData | null>(null)
   const [, setFrameworkLoading] = useState(false)
   const [investSummary, setInvestSummary] = useState<{
-    media_diagnosis: string
-    investment_posture: string
-    market_archetypes: {
-      growth_champions: { markets: string[]; reason: string }
-      scale_up_core: { markets: string[]; reason: string }
-      momentum_protect: { markets: string[]; reason: string }
-      emerging_bets: { markets: string[]; reason: string }
-      efficiency_laggards: { markets: string[]; reason: string }
-      false_positive_growth: { markets: string[]; reason: string }
-    }
-    budget_action: { increase: string[]; hold: string[]; reduce: string[]; test: string[]; budget_move: string }
     executive_summary: string
+    quadrant_notes?: Partial<Record<FrameworkMarket['quadrant'], string>>
     provider: string
   } | null>(null)
   const [investSummaryLoading, setInvestSummaryLoading] = useState(false)
@@ -1014,6 +1014,7 @@ function App() {
   const [trinityTrendData, setTrinityTrendData] = useState<DriverAnalysisResponse | null>(null)
   const [trinityTrendLoading, setTrinityTrendLoading] = useState(false)
   const [trinityTrendError, setTrinityTrendError] = useState('')
+  const [trinityMarketSignalRows, setTrinityMarketSignalRows] = useState<MarketSignalRow[]>([])
   const latestInsightsSelectionRef = useRef<{ brand: string; market: string }>({ brand: '', market: '' })
   const marketDropdownRef = useRef<HTMLDivElement | null>(null)
   const savedMenuRef = useRef<HTMLDivElement | null>(null)
@@ -1022,6 +1023,8 @@ function App() {
   const yoyRequestSeqRef = useRef(0)
   const driverAnalysisRequestSeqRef = useRef(0)
   const trinityTrendRequestSeqRef = useRef(0)
+  const trinityReportRef = useRef<HTMLDivElement | null>(null)
+  const [trinityPdfLoading, setTrinityPdfLoading] = useState(false)
   const sCurvesCacheRef = useRef<Map<string, SCurvesResponse>>(new Map())
   const contributionCacheRef = useRef<Map<string, ContributionResponse>>(new Map())
   const yoyCacheRef = useRef<Map<string, YoyGrowthResponse>>(new Map())
@@ -1319,6 +1322,16 @@ function App() {
       setFrameworkData(fRes.data)
       setFrameworkLoading(false)
       if (fRes.data.status === 'ok' && fRes.data.markets.length > 0) {
+        axios.post<{ market_signal_rows?: MarketSignalRow[] }>(`${API_BASE_URL}/api/scenarios/market-signals`, {
+          selected_brand: aiModeBrand,
+          selected_markets: fRes.data.markets.map((m) => m.market),
+        })
+          .then((response) => setTrinityMarketSignalRows(Array.isArray(response.data.market_signal_rows) ? response.data.market_signal_rows : []))
+          .catch(() => setTrinityMarketSignalRows([]))
+      } else {
+        setTrinityMarketSignalRows([])
+      }
+      if (fRes.data.status === 'ok' && fRes.data.markets.length > 0) {
         const sRes = await axios.post(`${API_BASE_URL}/api/investment-summary`, {
           brand: aiModeBrand,
           national_elasticity: (fRes.data as any).national_elasticity ?? null,
@@ -1339,6 +1352,110 @@ function App() {
     setStep1BaselineBudget(null)
     setStep1BaselineLoading(false)
   }, [])
+
+  async function handleDownloadTrinityPDF() {
+    const el = trinityReportRef.current
+    if (!el || !aiModeBrand) return
+    setTrinityPdfLoading(true)
+    try {
+      const [{ default: html2canvas }, { default: jsPDF }] = await Promise.all([
+        import('html2canvas'),
+        import('jspdf'),
+      ])
+      const canvas = await html2canvas(el, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: '#ffffff',
+        logging: false,
+        height: el.scrollHeight,
+        windowHeight: el.scrollHeight,
+      })
+      const imgData = canvas.toDataURL('image/png')
+
+      // Page dimensions: A4 width, height sized to content (no blank space)
+      const margin = 10
+      const headerH = 14
+      const footerH = 8
+      const A4_W_MM = 210
+      const usableW = A4_W_MM - margin * 2
+      const imgW = canvas.width
+      const imgH = canvas.height
+      const ratio = usableW / imgW          // mm per pixel
+      const scaledH = imgH * ratio          // content height in mm
+
+      // A4 page slot available for content (between header and footer)
+      const A4_H_MM = 297
+      const slotH = A4_H_MM - headerH - footerH - margin  // ~265mm
+
+      const drawHeader = (pdf: InstanceType<typeof jsPDF>, pageW: number) => {
+        pdf.setFillColor(37, 99, 235)
+        pdf.rect(0, 0, pageW, headerH, 'F')
+        pdf.setFont('helvetica', 'bold')
+        pdf.setFontSize(10)
+        pdf.setTextColor(255, 255, 255)
+        pdf.text(`${displayBrand(aiModeBrand)} — Brand Intelligence Report`, margin, 9)
+        pdf.setFont('helvetica', 'normal')
+        pdf.setFontSize(8)
+        pdf.text('Trinity Mode', pageW - margin, 9, { align: 'right' })
+      }
+
+      const drawFooter = (pdf: InstanceType<typeof jsPDF>, pageW: number, pageH: number, p: number, total: number) => {
+        pdf.setFont('helvetica', 'normal')
+        pdf.setFontSize(7)
+        pdf.setTextColor(150, 150, 150)
+        const today = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+        pdf.text(`Generated ${today} · QuantMatrix MMM Platform`, margin, pageH - 3)
+        pdf.text(`Page ${p} of ${total}`, pageW - margin, pageH - 3, { align: 'right' })
+      }
+
+      if (scaledH <= slotH) {
+        // Content fits on one page — make the page exactly as tall as needed
+        const exactPageH = headerH + scaledH + footerH + 4
+        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [A4_W_MM, exactPageH] })
+        const pageW = pdf.internal.pageSize.getWidth()
+        const pageH = pdf.internal.pageSize.getHeight()
+        drawHeader(pdf, pageW)
+        pdf.addImage(imgData, 'PNG', margin, headerH + 4, usableW, scaledH)
+        drawFooter(pdf, pageW, pageH, 1, 1)
+        const safeName = displayBrand(aiModeBrand).replace(/\s+/g, '_')
+        pdf.save(`Trinity_Report_${safeName}.pdf`)
+      } else {
+        // Multi-page: slice the canvas into A4-height chunks
+        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+        const pageW = pdf.internal.pageSize.getWidth()
+        const pageH = pdf.internal.pageSize.getHeight()
+        const contentTop = headerH + 4
+        const slicePixels = Math.floor(slotH / ratio)
+        let srcY = 0
+        let pageNum = 0
+        while (srcY < imgH) {
+          if (pageNum > 0) pdf.addPage()
+          drawHeader(pdf, pageW)
+          const currentSliceH = Math.min(slicePixels, imgH - srcY)
+          const sliceCanvas = document.createElement('canvas')
+          sliceCanvas.width = imgW
+          sliceCanvas.height = currentSliceH
+          const ctx = sliceCanvas.getContext('2d')!
+          ctx.drawImage(canvas, 0, srcY, imgW, currentSliceH, 0, 0, imgW, currentSliceH)
+          pdf.addImage(sliceCanvas.toDataURL('image/png'), 'PNG', margin, contentTop, usableW, currentSliceH * ratio)
+          srcY += currentSliceH
+          pageNum++
+        }
+        const totalPages = (pdf as any).internal.getNumberOfPages()
+        for (let p = 1; p <= totalPages; p++) {
+          pdf.setPage(p)
+          drawFooter(pdf, pageW, pageH, p, totalPages)
+        }
+        const safeName = displayBrand(aiModeBrand).replace(/\s+/g, '_')
+        pdf.save(`Trinity_Report_${safeName}.pdf`)
+      }
+
+      const safeName = displayBrand(aiModeBrand).replace(/\s+/g, '_')
+      pdf.save(`Trinity_Report_${safeName}.pdf`)
+    } finally {
+      setTrinityPdfLoading(false)
+    }
+  }
 
   useEffect(() => {
     if (!brandAllocation) {
@@ -4473,19 +4590,32 @@ function App() {
       const chartRows = (trinityTrendData?.timeline ?? []).map((point) => ({
         month: point.date_label || point.date,
         actual_volume_lakh: Number(point.volume_mn ?? 0) * 10,
-        predicted_volume_lakh: Number(point.predicted_volume_mn ?? 0) * 10,
       }))
       const firstRow = chartRows[0]
       const lastRow = chartRows[chartRows.length - 1]
       const summary = trinityTrendData?.summary
+      const frameworkMarket = frameworkData?.markets.find((m) => m.market === trinityTrendMarket)
+      const signalRow =
+        trinityMarketSignalRows.find((row) => row.market === trinityTrendMarket)
+        ?? marketSignalRows.find((row) => row.market === trinityTrendMarket)
+      const fmtPctRatio = (value: number | null | undefined, digits = 1) =>
+        value == null || !Number.isFinite(Number(value)) ? '-' : `${Number(value).toFixed(digits)}%`
+      const fmtSignedPctRatio = (value: number | null | undefined, digits = 1) => {
+        if (value == null || !Number.isFinite(Number(value))) return '-'
+        const pct = Number(value)
+        return `${pct > 0 ? '+' : ''}${pct.toFixed(digits)}%`
+      }
+      const fmtElasticity = (value: number | null | undefined) =>
+        value == null || !Number.isFinite(Number(value)) ? '-' : `${Number(value).toFixed(2)}%`
+
 
       return (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-slate-900/35 px-4 py-6 backdrop-blur-sm">
           <button type="button" aria-label="Close market trend" className="absolute inset-0" onClick={closeTrinityTrendModal} />
-          <div className="relative w-full max-w-4xl rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
+          <div className="relative max-h-[88vh] w-full max-w-6xl overflow-y-auto rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
             <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-4">
               <div>
-                <p className="text-[10px] font-bold uppercase tracking-widest text-primary">Market Volume Trend</p>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-primary">Market Summary</p>
                 <h3 className="mt-1 text-lg font-semibold text-dark-text">
                   {displayBrand(aiModeBrand)} - {trinityTrendMarket}
                 </h3>
@@ -4514,8 +4644,8 @@ function App() {
 
             {!trinityTrendLoading && !trinityTrendError && trinityTrendData ? (
               <div className="mt-4 space-y-4">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-3">
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-3 lg:col-span-2">
                     <p className="text-[10px] font-bold uppercase tracking-wide text-blue-600">Period</p>
                     <p className="mt-1 text-sm font-bold text-blue-950">
                       {trinityTrendData.selection.from_label || firstRow?.month || '-'} to {trinityTrendData.selection.to_label || lastRow?.month || '-'}
@@ -4527,22 +4657,49 @@ function App() {
                       {summary ? `${formatRawNumber(Number(summary.volume_now_mn ?? 0) * 10)} Lakh` : '-'}
                     </p>
                   </div>
+                  <div className="rounded-xl border border-violet-200 bg-violet-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-violet-700">Elasticity</p>
+                    <p className="mt-1 text-sm font-bold text-violet-950">{fmtElasticity(frameworkMarket?.overall_media_elasticity)}</p>
+                  </div>
                 </div>
 
-                {chartRows.length === 0 ? (
-                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-8 text-center text-sm text-slate-500">
-                    No monthly trend points were returned for this brand-market.
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Market Signals</p>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Category Salience</p>
+                    <p className="mt-1 text-sm font-bold text-slate-900">{fmtPctRatio(signalRow?.category_salience ?? frameworkMarket?.category_salience)}</p>
                   </div>
-                ) : (
-                  <div className="h-80 rounded-xl border border-slate-200 bg-white p-3">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Brand Salience</p>
+                    <p className="mt-1 text-sm font-bold text-slate-900">{fmtPctRatio(signalRow?.brand_salience ?? frameworkMarket?.brand_salience)}</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-white p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Market Share Change</p>
+                    <p className={`mt-1 text-sm font-bold ${Number(signalRow?.change_in_market_share ?? 0) < 0 ? 'text-red-700' : 'text-emerald-700'}`}>
+                      {fmtSignedPctRatio(signalRow?.change_in_market_share)}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-white p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Brand Equity Change</p>
+                    <p className={`mt-1 text-sm font-bold ${Number(signalRow?.change_in_brand_equity ?? 0) < 0 ? 'text-red-700' : 'text-emerald-700'}`}>
+                      {fmtSignedPctRatio(signalRow?.change_in_brand_equity)}
+                    </p>
+                  </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-4">
+                  {chartRows.length === 0 ? (
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-8 text-center text-sm text-slate-500">
+                      No monthly trend points were returned for this brand-market.
+                    </div>
+                  ) : (
+                    <div className="h-72 rounded-xl border border-slate-200 bg-white p-3">
                     <div className="mb-2 flex flex-wrap items-center gap-4 px-1 text-[11px] font-semibold text-slate-600">
                       <span className="inline-flex items-center gap-1.5">
                         <span className="h-0.5 w-7 rounded-full bg-[#2563EB]" />
                         Actual Volume
-                      </span>
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="h-0.5 w-7 rounded-full border-t-2 border-dashed border-[#16A34A]" />
-                        Predicted Volume
                       </span>
                     </div>
                     <ResponsiveContainer width="100%" height="100%">
@@ -4553,16 +4710,17 @@ function App() {
                         <Tooltip
                           formatter={(value, name) => [
                             `${Number(value).toFixed(2)} Lakh`,
-                            name === 'actual_volume_lakh' ? 'Actual Volume' : 'Predicted Volume',
+                            name === 'actual_volume_lakh' ? 'Actual Volume' : String(name),
                           ]}
                           labelStyle={{ color: '#0F172A', fontWeight: 700 }}
                         />
                         <Line type="monotone" dataKey="actual_volume_lakh" stroke="#2563EB" strokeWidth={2.4} dot={{ r: 2.5 }} activeDot={{ r: 4 }} />
-                        <Line type="monotone" dataKey="predicted_volume_lakh" stroke="#16A34A" strokeWidth={2} strokeDasharray="5 4" dot={false} />
                       </LineChart>
                     </ResponsiveContainer>
-                  </div>
-                )}
+                    </div>
+                  )}
+
+                </div>
               </div>
             ) : null}
           </div>
@@ -4633,6 +4791,18 @@ function App() {
                   {aiModeLoading ? 'Generating...' : 'Generate Trinity Report'}
                 </button>
 
+                {!aiModeLoading && frameworkData?.status === 'ok' ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleDownloadTrinityPDF()}
+                    disabled={trinityPdfLoading}
+                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <Download className="h-4 w-4 text-slate-500" />
+                    {trinityPdfLoading ? 'Preparing PDF…' : 'Download Report PDF'}
+                  </button>
+                ) : null}
+
                 {aiModeError ? (
                   <div className="rounded-lg border border-danger/20 bg-danger/10 px-3 py-2 text-sm text-danger">{aiModeError}</div>
                 ) : null}
@@ -4665,14 +4835,14 @@ function App() {
 
               {/* Results — summary + grid */}
               {!aiModeLoading && frameworkData?.status === 'ok' ? (
-                <div className="space-y-5">
+                <div ref={trinityReportRef} className="space-y-5">
                   {/* AI Investment Cards */}
                   {investSummaryLoading ? (
                     <div className="grid grid-cols-2 gap-3">
                       {[...Array(6)].map((_, i) => <div key={i} className="h-28 animate-pulse rounded-xl border border-slate-200 bg-slate-100" />)}
                     </div>
                   ) : null}
-                  {!investSummaryLoading && investSummary?.media_diagnosis ? (
+                  {!investSummaryLoading && investSummary?.executive_summary ? (
                     <div className="space-y-3">
                       {/* Header */}
                       <div className="flex items-center justify-between">
@@ -4686,79 +4856,33 @@ function App() {
                       </div>
 
                       {/* Executive Summary */}
-                      {investSummary.executive_summary ? (
-                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Executive Summary</p>
-                          <p className="mt-1.5 text-sm leading-relaxed text-slate-700">{investSummary.executive_summary}</p>
-                        </div>
-                      ) : null}
-
-                      {/* Diagnosis + Posture */}
-                      <div className="grid grid-cols-2 gap-3">
-                        <div className="rounded-xl border border-slate-200 bg-white p-4">
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Media Diagnosis</p>
-                          <p className="mt-2 text-sm leading-relaxed text-slate-700">{investSummary.media_diagnosis}</p>
-                        </div>
-                        <div className="rounded-xl border border-[#FFBD59]/40 bg-[#FFFBEB] p-4">
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-[#B45309]">Investment Posture</p>
-                          <p className="mt-2 text-sm leading-relaxed text-[#92400E]">{investSummary.investment_posture}</p>
-                        </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-4">
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Executive Summary</p>
+                        <ul className="mt-2 list-disc space-y-1.5 pl-5 text-sm leading-relaxed text-slate-700">
+                          {investSummary.executive_summary
+                            .split(/\r?\n/)
+                            .map((line) => line.trim().replace(/^[-•]\s*/, ''))
+                            .filter(Boolean)
+                            .slice(0, 3)
+                            .map((line, idx) => <li key={`investment-summary-${idx}`}>{line}</li>)}
+                        </ul>
                       </div>
-
-                      {/* Market Archetypes */}
-                      {investSummary.market_archetypes ? (() => {
-                        const arc = investSummary.market_archetypes
-                        const cards = [
-                          { key: 'growth_champions', label: '★ Growth Champions', bg: 'bg-green-50', border: 'border-green-200', pill: 'bg-green-100 text-green-800', text: 'text-green-700', data: arc.growth_champions },
-                          { key: 'scale_up_core', label: '↑ Scale-up Core', bg: 'bg-emerald-50', border: 'border-emerald-200', pill: 'bg-emerald-100 text-emerald-800', text: 'text-emerald-700', data: arc.scale_up_core },
-                          { key: 'momentum_protect', label: '— Momentum Protect', bg: 'bg-amber-50', border: 'border-amber-200', pill: 'bg-amber-100 text-amber-800', text: 'text-amber-700', data: arc.momentum_protect },
-                          { key: 'emerging_bets', label: '◎ Emerging Bets', bg: 'bg-blue-50', border: 'border-blue-200', pill: 'bg-blue-100 text-blue-800', text: 'text-blue-700', data: arc.emerging_bets },
-                          { key: 'efficiency_laggards', label: '↓ Efficiency Laggards', bg: 'bg-red-50', border: 'border-red-200', pill: 'bg-red-100 text-red-700', text: 'text-red-700', data: arc.efficiency_laggards },
-                          { key: 'false_positive_growth', label: '⚠ False Positive Growth', bg: 'bg-orange-50', border: 'border-orange-200', pill: 'bg-orange-100 text-orange-800', text: 'text-orange-700', data: arc.false_positive_growth },
-                        ].filter((c) => c.data?.markets?.length > 0)
-                        return (
-                          <div>
-                            <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">Market Archetypes</p>
-                            <div className="grid grid-cols-3 gap-2">
-                              {cards.map((c) => (
-                                <div key={c.key} className={`rounded-xl border ${c.border} ${c.bg} p-3`}>
-                                  <p className={`text-[10px] font-bold uppercase tracking-wide ${c.text}`}>{c.label}</p>
-                                  <div className="mt-1.5 flex flex-wrap gap-1">
-                                    {c.data.markets.map((m: string) => (
-                                      <span key={m} className={`inline-block rounded-full px-2 py-0.5 text-[11px] font-semibold ${c.pill}`}>{m}</span>
-                                    ))}
-                                  </div>
-                                  <p className={`mt-2 border-t pt-1.5 text-[11px] leading-relaxed ${c.text} border-current/20`}>{c.data.reason}</p>
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        )
-                      })() : null}
-
-                      {/* Budget Action */}
-                      {investSummary.budget_action ? (
-                        <div className="rounded-xl border border-primary/20 bg-primary/5 p-4">
-                          <p className="text-[10px] font-bold uppercase tracking-widest text-primary">Budget Move</p>
-                          <p className="mt-1.5 text-sm font-medium text-slate-700">{investSummary.budget_action.budget_move}</p>
-                          <div className="mt-3 flex flex-wrap gap-3 text-[11px]">
-                            {investSummary.budget_action.increase?.length > 0 && <span><span className="font-bold text-green-700">↑ Increase:</span> <span className="text-slate-600">{investSummary.budget_action.increase.join(', ')}</span></span>}
-                            {investSummary.budget_action.hold?.length > 0 && <span><span className="font-bold text-amber-700">— Hold:</span> <span className="text-slate-600">{investSummary.budget_action.hold.join(', ')}</span></span>}
-                            {investSummary.budget_action.test?.length > 0 && <span><span className="font-bold text-blue-700">◎ Test:</span> <span className="text-slate-600">{investSummary.budget_action.test.join(', ')}</span></span>}
-                            {investSummary.budget_action.reduce?.length > 0 && <span><span className="font-bold text-red-700">↓ Reduce:</span> <span className="text-slate-600">{investSummary.budget_action.reduce.join(', ')}</span></span>}
-                          </div>
-                        </div>
-                      ) : null}
                     </div>
                   ) : null}
 
                   {/* Investment Framework Grid */}
-                  <InvestmentFrameworkChart data={frameworkData} displayBrandName={displayBrand(aiModeBrand)} />
+                  <InvestmentFrameworkChart
+                    data={frameworkData}
+                    displayBrandName={displayBrand(aiModeBrand)}
+                    quadrantNotes={investSummary?.quadrant_notes}
+                    onMarketClick={TRINITY_TREND_BRANDS.has(aiModeBrand) ? (market) => void openTrinityTrendModal(market.market) : undefined}
+                  />
 
                   {/* India Map */}
                   <IndiaMapChart
                     markets={frameworkData.markets}
-                    onMarketClick={TRINITY_TREND_BRANDS.has(aiModeBrand) ? (market) => void openTrinityTrendModal(market.market) : undefined}
+                    nationalElasticity={(frameworkData as any).national_elasticity ?? null}
+                    nationalYoy={(frameworkData as any).national_yoy ?? null}
                   />
                 </div>
               ) : null}
