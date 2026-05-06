@@ -1358,10 +1358,10 @@ function App() {
     if (!el || !aiModeBrand) return
     setTrinityPdfLoading(true)
     try {
-      const [{ default: html2canvas }, { default: jsPDF }] = await Promise.all([
-        import('html2canvas'),
-        import('jspdf'),
-      ])
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const html2canvas = ((await import('html2canvas')) as any).default as (el: HTMLElement, opts?: any) => Promise<HTMLCanvasElement>
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const JsPDF = ((await import('jspdf')) as any).default as new (...args: any[]) => any
       const canvas = await html2canvas(el, {
         scale: 2,
         useCORS: true,
@@ -1411,7 +1411,7 @@ function App() {
       if (scaledH <= slotH) {
         // Content fits on one page — make the page exactly as tall as needed
         const exactPageH = headerH + scaledH + footerH + 4
-        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [A4_W_MM, exactPageH] })
+        const pdf = new JsPDF({ orientation: 'portrait', unit: 'mm', format: [A4_W_MM, exactPageH] })
         const pageW = pdf.internal.pageSize.getWidth()
         const pageH = pdf.internal.pageSize.getHeight()
         drawHeader(pdf, pageW)
@@ -1421,7 +1421,7 @@ function App() {
         pdf.save(`Trinity_Report_${safeName}.pdf`)
       } else {
         // Multi-page: slice the canvas into A4-height chunks
-        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+        const pdf = new JsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
         const pageW = pdf.internal.pageSize.getWidth()
         const pageH = pdf.internal.pageSize.getHeight()
         const contentTop = headerH + 4
