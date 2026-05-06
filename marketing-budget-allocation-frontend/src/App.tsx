@@ -1383,11 +1383,7 @@ function App() {
       const ratio = usableW / imgW          // mm per pixel
       const scaledH = imgH * ratio          // content height in mm
 
-      // A4 page slot available for content (between header and footer)
-      const A4_H_MM = 297
-      const slotH = A4_H_MM - headerH - footerH - margin  // ~265mm
-
-      const drawHeader = (pdf: any, pageW: number) => {
+const drawHeader = (pdf: any, pageW: number) => {
         pdf.setFillColor(37, 99, 235)
         pdf.rect(0, 0, pageW, headerH, 'F')
         pdf.setFont('helvetica', 'bold')
@@ -1408,47 +1404,18 @@ function App() {
         pdf.text(`Page ${p} of ${total}`, pageW - margin, pageH - 3, { align: 'right' })
       }
 
-      if (scaledH <= slotH) {
-        // Content fits on one page — make the page exactly as tall as needed
-        const exactPageH = headerH + scaledH + footerH + 4
-        const pdf = new JsPDF({ orientation: 'portrait', unit: 'mm', format: [A4_W_MM, exactPageH] })
-        const pageW = pdf.internal.pageSize.getWidth()
-        const pageH = pdf.internal.pageSize.getHeight()
-        drawHeader(pdf, pageW)
-        pdf.addImage(imgData, 'PNG', margin, headerH + 4, usableW, scaledH)
-        drawFooter(pdf, pageW, pageH, 1, 1)
-        const safeName = displayBrand(aiModeBrand).replace(/\s+/g, '_')
-        pdf.save(`Trinity_Report_${safeName}.pdf`)
-      } else {
-        // Multi-page: slice the canvas into A4-height chunks
-        const pdf = new JsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
-        const pageW = pdf.internal.pageSize.getWidth()
-        const pageH = pdf.internal.pageSize.getHeight()
-        const contentTop = headerH + 4
-        const slicePixels = Math.floor(slotH / ratio)
-        let srcY = 0
-        let pageNum = 0
-        while (srcY < imgH) {
-          if (pageNum > 0) pdf.addPage()
-          drawHeader(pdf, pageW)
-          const currentSliceH = Math.min(slicePixels, imgH - srcY)
-          const sliceCanvas = document.createElement('canvas')
-          sliceCanvas.width = imgW
-          sliceCanvas.height = currentSliceH
-          const ctx = sliceCanvas.getContext('2d')!
-          ctx.drawImage(canvas, 0, srcY, imgW, currentSliceH, 0, 0, imgW, currentSliceH)
-          pdf.addImage(sliceCanvas.toDataURL('image/png'), 'PNG', margin, contentTop, usableW, currentSliceH * ratio)
-          srcY += currentSliceH
-          pageNum++
-        }
-        const totalPages = (pdf as any).internal.getNumberOfPages()
-        for (let p = 1; p <= totalPages; p++) {
-          pdf.setPage(p)
-          drawFooter(pdf, pageW, pageH, p, totalPages)
-        }
-        const safeName = displayBrand(aiModeBrand).replace(/\s+/g, '_')
-        pdf.save(`Trinity_Report_${safeName}.pdf`)
-      }
+      // Always use a single page sized exactly to content height.
+      // This avoids blank trailing pages that appear when content is just
+      // slightly taller than a standard A4 slot (265mm threshold).
+      const exactPageH = headerH + scaledH + footerH + 4
+      const pdf = new JsPDF({ orientation: 'portrait', unit: 'mm', format: [A4_W_MM, exactPageH] })
+      const pageW = pdf.internal.pageSize.getWidth()
+      const pageH = pdf.internal.pageSize.getHeight()
+      drawHeader(pdf, pageW)
+      pdf.addImage(imgData, 'PNG', margin, headerH + 4, usableW, scaledH)
+      drawFooter(pdf, pageW, pageH, 1, 1)
+      const safeName = displayBrand(aiModeBrand).replace(/\s+/g, '_')
+      pdf.save(`Trinity_Report_${safeName}.pdf`)
 
     } finally {
       setTrinityPdfLoading(false)
