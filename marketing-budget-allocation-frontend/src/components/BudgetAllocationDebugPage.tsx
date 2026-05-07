@@ -1451,6 +1451,11 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
     }).format(value)
   }
 
+  function formatBudgetMillions(value: number | null | undefined) {
+    if (value == null || !Number.isFinite(value)) return 'n/a'
+    return `₹${new Intl.NumberFormat('en-IN', { maximumFractionDigits: 1 }).format(value / 1_000_000)} Mn`
+  }
+
   function formatCompactCountValue(value: number | null | undefined) {
     if (value == null || !Number.isFinite(value)) return 'n/a'
     return new Intl.NumberFormat('en', {
@@ -1886,7 +1891,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       <div className="mt-2">
                         <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Last Year Budget</p>
                         <p className="mt-0.5 text-sm font-bold text-slate-900">
-                          {tb ? formatBudgetValue(tb) : '—'}
+                          {tb ? formatBudgetMillions(tb) : '—'}
                         </p>
                       </div>
                     )
