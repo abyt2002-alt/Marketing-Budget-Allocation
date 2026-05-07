@@ -8965,6 +8965,8 @@ _BRAND_DISPLAY_MAP: dict[str, str] = {
     "Aer O": "Velvet Bloom",
     "Aer PP": "Cedar Mist",
     "Aer Spray": "Amber Dusk",
+    "Godrej Expert Rich Cr\u00e8me": "Ros\u00e9 \u00c9lite",
+    "Godrej Expert Rich Cr?me": "Ros\u00e9 \u00c9lite",
     "Godrej Expert Rich CrÃ¨me": "RosÃ© Ã‰lite",
     "Godrej Shampoo Hair Color": "Oud Royale",
 }

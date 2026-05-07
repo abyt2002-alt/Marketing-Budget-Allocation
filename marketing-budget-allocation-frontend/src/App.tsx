@@ -4831,7 +4831,7 @@ const drawHeader = (pdf: any, pageW: number) => {
                             .map((line) => line.trim().replace(/^[-•]\s*/, ''))
                             .filter(Boolean)
                             .slice(0, 3)
-                            .map((line, idx) => <li key={`investment-summary-${idx}`}>{line}</li>)}
+                            .map((line, idx) => <li key={`investment-summary-${idx}`}>{maskBrandInLabel(line)}</li>)}
                         </ul>
                       </div>
                     </div>
