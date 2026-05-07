@@ -11,6 +11,8 @@ export const displayBrand = (brand: string): string => BRAND_DISPLAY_MAP[brand] 
 
 // Replace brand name substrings in driver labels (e.g. "Halo Media Reach Aer O" → "Halo Media Reach Velvet Bloom")
 export const maskBrandInLabel = (label: string): string => {
+  if (/^seasonality\b/i.test(label.trim())) return 'Seasonality'
+
   let result = label
   // Sort by length descending so longer names match first (e.g. "Aer Spray" before "Aer")
   const sorted = Object.entries(BRAND_DISPLAY_MAP).sort((a, b) => b[0].length - a[0].length)
