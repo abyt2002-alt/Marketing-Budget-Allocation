@@ -7,6 +7,8 @@ type AutoConfigResponse = {
   markets_by_brand: Record<string, string[]>
   default_brand: string
   default_markets: string[]
+  default_baseline_budget?: number | null
+  brand_baseline_budgets?: Record<string, number>
   last_known_budget?: number | null
 }
 
@@ -597,8 +599,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
   const [showMarketSignals, setShowMarketSignals] = useState(true)
   const [mktSortCol, setMktSortCol] = useState<string>('market')
   const [mktSortDir, setMktSortDir] = useState<'asc'|'desc'>('asc')
-  const [mktShareFilter, setMktShareFilter] = useState<'all'|'positive'|'negative'>('all')
-  const [mktEquityFilter, setMktEquityFilter] = useState<'all'|'positive'|'negative'>('all')
   const [setupCollapsed, setSetupCollapsed] = useState(false)
   const [budgetIncreasePct, setBudgetIncreasePct] = useState(5)
   const [scenarioRangeLowerPct, setScenarioRangeLowerPct] = useState(80)
@@ -1051,7 +1051,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
           className="flex w-full items-center justify-between px-4 py-3 text-left"
         >
           <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-600">Market Spend Control</span>
+            <span className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-600">Market-Level Filters</span>
             {activeCount > 0 && (
               <span className="rounded-full bg-[#f4ece0] px-2 py-0.5 text-[10px] font-semibold text-[#7b5c33]">
                 {activeCount} condition{activeCount !== 1 ? 's' : ''} active
@@ -1847,11 +1847,10 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   </select>
                 </div>
 
-                {/* Scenario Band */}
+                {/* Budget Range */}
                 <div className="flex min-w-[240px] flex-1 flex-col justify-center px-5 py-4">
                   <div className="flex items-center justify-between gap-2">
-                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Scenario Band</p>
-                    <span className="text-[10px] text-slate-400">Post approval</span>
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Budget Range</p>
                   </div>
                   <div className="mt-2 flex items-center gap-2">
                     <div className="relative w-full">
@@ -1877,14 +1876,19 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                     </div>
                   </div>
                   {(() => {
-                    const tb = scenarioResults?.summary.target_budget
-                      ?? scenarioHandoff?.budget_context.target_budget
-                      ?? (result?.selection?.baseline_budget ? result.selection.baseline_budget * (1 + budgetIncreasePct / 100) : null)
-                      ?? config?.last_known_budget ?? null
+                    const selectedBrandBudget = config?.brand_baseline_budgets?.[brand]
+                    const resultBudget = result?.selection?.brand === brand ? result.selection.baseline_budget : null
+                    const tb = selectedBrandBudget
+                      ?? resultBudget
+                      ?? (brand === config?.default_brand ? config?.default_baseline_budget : null)
+                      ?? null
                     return (
-                      <p className="mt-1.5 text-[11px] text-slate-400">
-                        {tb ? `${formatBudgetValue(tb * (scenarioRangeLowerPct / 100))} – ${formatBudgetValue(tb * (scenarioRangeUpperPct / 100))}` : '—'}
-                      </p>
+                      <div className="mt-2">
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-400">Last Year Budget</p>
+                        <p className="mt-0.5 text-sm font-bold text-slate-900">
+                          {tb ? formatBudgetValue(tb) : '—'}
+                        </p>
+                      </div>
                     )
                   })()}
                 </div>
@@ -1902,11 +1906,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       Interpreting…
                     </span>
                   ) : (
-                    <>
-                      <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/60">Run Trinity</span>
-                      <span className="mt-1 text-sm font-bold">Interpret Prompt →</span>
-                      <span className="mt-1 text-[11px] leading-4 text-white/60">Build the plan before QA and scenario generation.</span>
-                    </>
+                    <span className="text-sm font-bold">Interpret Prompt</span>
                   )}
                 </button>
               </div>
@@ -1949,41 +1949,17 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                     if (mktSortCol === col) setMktSortDir(d => d === 'asc' ? 'desc' : 'asc')
                     else { setMktSortCol(col); setMktSortDir('asc') }
                   }
-                  const filtered = marketSignalRows.filter(r => {
-                    if (mktShareFilter === 'positive' && (r.change_in_market_share ?? 0) < 0) return false
-                    if (mktShareFilter === 'negative' && (r.change_in_market_share ?? 0) >= 0) return false
-                    if (mktEquityFilter === 'positive' && (r.change_in_brand_equity ?? 0) < 0) return false
-                    if (mktEquityFilter === 'negative' && (r.change_in_brand_equity ?? 0) >= 0) return false
-                    return true
-                  })
-                  const sorted = [...filtered].sort((a, b) => {
+                  const sorted = [...marketSignalRows].sort((a, b) => {
                     const av = (a as any)[mktSortCol] ?? ''
                     const bv = (b as any)[mktSortCol] ?? ''
                     const cmp = typeof av === 'number' ? av - bv : String(av).localeCompare(String(bv))
                     return mktSortDir === 'asc' ? cmp : -cmp
                   })
-                  const filterBtn = (active: 'all'|'positive'|'negative', current: 'all'|'positive'|'negative', set: (v: 'all'|'positive'|'negative') => void, label: string, color?: string) =>
-                    <button type="button" onClick={() => set(active)}
-                      className={`rounded-full px-2.5 py-1 text-[10px] font-semibold transition-all ${current === active
-                        ? color === 'green' ? 'bg-emerald-100 text-emerald-700 ring-1 ring-emerald-300'
-                          : color === 'red' ? 'bg-red-100 text-red-700 ring-1 ring-red-300'
-                          : 'bg-[#9c8060] text-white'
-                        : 'bg-white border border-[#e0d5c5] text-slate-500 hover:border-[#9c8060] hover:text-[#9c8060]'}`}>{label}</button>
                   return (
                     <div className="flex w-1/2 shrink-0 flex-col px-4 py-4">
                       <div className="flex items-center justify-between gap-2 mb-3">
-                        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Market Data <span className="font-normal normal-case tracking-normal text-slate-400">— reference while writing</span></p>
+                        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[#9c8060]">Market Data</p>
                         <button type="button" onClick={() => setShowMarketSignals(false)} className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-0.5 text-[10px] font-semibold text-slate-500 hover:border-[#9c7a4a]">✕ Hide</button>
-                      </div>
-                      <div className="mb-3 flex flex-wrap items-center gap-2 rounded-xl bg-[#faf7f2] px-3 py-2 border border-[#ede4d6]">
-                        <span className="text-[10px] font-semibold text-slate-400">Mkt Share:</span>
-                        {filterBtn('all', mktShareFilter, setMktShareFilter, 'All')}
-                        {filterBtn('positive', mktShareFilter, setMktShareFilter, '▲ Gaining', 'green')}
-                        {filterBtn('negative', mktShareFilter, setMktShareFilter, '▼ Losing', 'red')}
-                        <span className="ml-1 text-[10px] font-semibold text-slate-400">Brand Equity:</span>
-                        {filterBtn('all', mktEquityFilter, setMktEquityFilter, 'All')}
-                        {filterBtn('positive', mktEquityFilter, setMktEquityFilter, '▲ Improving', 'green')}
-                        {filterBtn('negative', mktEquityFilter, setMktEquityFilter, '▼ Declining', 'red')}
                       </div>
                       <div className="flex-1 overflow-y-auto rounded-xl border border-[#ede4d6]" style={{maxHeight: '220px'}}>
                         <table className="w-full text-[11px]">
@@ -2044,11 +2020,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                     placeholder="e.g. Increase media where I am losing market share and brand salience is below category salience…"
                     className="flex-1 min-h-[200px] w-full resize-none rounded-xl border border-[#d7cbb7] bg-white px-4 py-3 text-sm leading-6 text-slate-700 outline-none transition focus:border-[#8b6a3f] focus:ring-4 focus:ring-[#c9b79b]/30"
                   />
-                  <div className="mt-2.5 flex flex-wrap gap-1.5">
-                    {['Loss recovery', 'Salience based', 'Multi-condition'].map((tag) => (
-                      <span key={tag} className="rounded-full border border-[#d7cbb7] px-2.5 py-0.5 text-[11px] text-slate-500">{tag}</span>
-                    ))}
-                  </div>
                 </div>
               </div>
 
@@ -2193,24 +2164,19 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   <div className="flex flex-col">
                   {/* QA section */}
                   <div id="business-qa-check" className="order-2 px-5 py-5">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">Business QA Check</p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {approvalEvaluation ? (
-                          <span className="rounded-full bg-slate-100 px-3 py-1 text-[11px] font-semibold text-slate-600">
-                            {approvalEvaluation.approved_market_count} markets
-                          </span>
-                        ) : null}
-                        <button
-                          type="button"
-                          onClick={() => setQaSectionCollapsed((prev) => !prev)}
-                          className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-[#9c7a4a] hover:text-[#7b5c33]"
-                        >
-                          {qaSectionCollapsed ? 'Expand ▼' : 'Collapse ▲'}
-                        </button>
-                      </div>
+                    <div className="flex items-center justify-between gap-3">
+                      {qaSectionCollapsed ? (
+                        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">AI Interpretation of the Prompt</p>
+                      ) : (
+                        <span />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setQaSectionCollapsed((prev) => !prev)}
+                        className="rounded-full border border-[#d7cbb7] bg-white px-2.5 py-1 text-[11px] font-semibold text-slate-600 transition hover:border-[#9c7a4a] hover:text-[#7b5c33]"
+                      >
+                        {qaSectionCollapsed ? 'Expand ▼' : 'Collapse ▲'}
+                      </button>
                     </div>
 
                     {!qaSectionCollapsed && approvalLoading && (
@@ -2236,7 +2202,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                             className="flex w-full items-center justify-between px-4 py-3 text-left transition hover:bg-[#f5ede0] rounded-xl"
                           >
                             <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 pr-3">
-                              <span className="shrink-0 text-xs font-semibold uppercase tracking-[0.14em] text-[#8c7554]">What Trinity Understood</span>
+                              <span className="shrink-0 text-xs font-semibold uppercase tracking-[0.14em] text-[#8c7554]">AI Interpretation of the Prompt</span>
                               {approvalHeadline && <span className="rounded-full bg-[#e8ddd0] px-2 py-0.5 text-[10px] font-semibold leading-5 text-[#7b5c33]">{approvalHeadline}</span>}
                             </div>
                             <span className="text-xs font-semibold text-[#8c7554] shrink-0">{understandingCollapsed ? 'Show ▼' : 'Hide ▲'}</span>
@@ -2292,7 +2258,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                               {hasInterpretationSteps && (
                                 <div className="border-t border-[#e8ddd0] pt-3">
                                   <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8c7554] mb-2">
-                                    How Trinity Interpreted This <span className="ml-1 font-normal normal-case tracking-normal text-slate-400">{interpretationStepCount} steps · {finalMarkets.length} markets</span>
+                                    AI Interpretation of the Prompt <span className="ml-1 font-normal normal-case tracking-normal text-slate-400">{interpretationStepCount} steps · {finalMarkets.length} markets</span>
                                   </p>
                                   <div className="space-y-1.5">
                                     <p className="text-[11px] font-medium text-slate-400">Click any step to inspect how the filter worked.</p>
@@ -2365,41 +2331,32 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                           <div className="space-y-2">
                             <div className="flex items-baseline justify-between">
                               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">
-                                Market Scoring — {dispositions.length} markets
+                                Execution Plan
                               </p>
                               <p className="text-[10px] text-slate-400">Current card actions · updates live</p>
                             </div>
 
-                            <div className="grid gap-1.5 md:grid-cols-3">
+                            <div className="grid gap-3 md:grid-cols-3">
                               {simplifiedScoringTiers.map((tier) => {
                                 const s = colStyle[tier.col] ?? colStyle[2]
                                 const group = activeDispositions.filter((d) => d.col === tier.col)
                                 return (
-                                  <div key={tier.id} className={`rounded-xl border p-2.5 ${s.bg} ${s.border}`}>
-                                    <div className="space-y-0.5">
-                                      <p className={`text-[10px] font-bold uppercase tracking-[0.1em] ${s.head}`}>{tier.action}</p>
+                                  <div key={tier.id} className={`rounded-2xl border p-3 shadow-sm ${s.bg} ${s.border}`}>
+                                    <div className="flex items-center justify-between gap-3">
+                                      <p className={`text-[11px] font-bold uppercase tracking-[0.12em] ${s.head}`}>{tier.action}</p>
+                                      <span className={`rounded-full bg-white/70 px-2.5 py-0.5 text-[11px] font-bold ${s.head}`}>
+                                        {group.length}
+                                      </span>
                                     </div>
-                                    <div className="mt-2 h-1 w-full rounded-full bg-white/60">
-                                      <div className={`h-1 rounded-full ${s.bar}`} style={{ width: `${tier.col === 1 ? 50 : 100}%` }} />
-                                    </div>
-                                    <div className="mt-2 space-y-1.5">
+                                    <div className="mt-3 flex min-h-[8rem] flex-wrap content-start gap-1.5">
                                       {group.length === 0 ? (
-                                        <p className="text-[10px] italic text-slate-300">—</p>
+                                        <p className="text-xs italic text-slate-300">No markets</p>
                                       ) : group.map((d) => (
-                                        <div key={d.market}>
-                                          <div className="flex items-center justify-between gap-0.5">
-                                            <span className="truncate text-[11px] font-medium text-slate-700 leading-tight">{d.market}</span>
-                                            <span className={`shrink-0 text-[10px] font-semibold tabular-nums ${s.score}`}>
-                                              {d.criteria_total > 0 ? `${d.criteria_met}/${d.criteria_total}` : '—'}
-                                            </span>
-                                          </div>
-                                          <div className="mt-0.5 h-0.5 w-full rounded-full bg-white/50">
-                                            <div className={`h-0.5 rounded-full ${s.bar} opacity-70`} style={{ width: `${d.score_pct}%` }} />
-                                          </div>
-                                        </div>
+                                        <span key={d.market} className="rounded-full bg-white/75 px-2.5 py-1 text-[11px] font-semibold leading-none text-slate-700 ring-1 ring-white/80">
+                                          {d.market}
+                                        </span>
                                       ))}
                                     </div>
-                                    <p className={`mt-2 text-right text-[10px] font-bold ${s.head}`}>{group.length}</p>
                                   </div>
                                 )
                               })}
@@ -2495,7 +2452,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 <div className="mt-4 space-y-2">
                   <div className="flex items-baseline justify-between">
                     <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">
-                      Market Scoring — {dispositions.length} markets
+                      Execution Plan
                     </p>
                     <p className="text-[10px] text-slate-400">{interp?.is_multi_segment ? 'Assigned by segment · exceptions override' : 'Each column = 20% of criteria score'}</p>
                   </div>
@@ -2552,17 +2509,13 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                 </div>
               )}
 
-                        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4">
-                          <div>
-                            <p className="text-sm font-semibold text-slate-900">Save QA action changes</p>
-                            <p className="mt-1 text-xs text-slate-500">Use this after changing increase, decrease, or maintain selections so scenario generation reflects them.</p>
-                          </div>
+                        <div className="flex justify-end">
                           <button
                             type="button"
                             onClick={saveQaActionSelections}
                             className="rounded-full bg-[#7b5c33] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#6c4f2a]"
                           >
-                            Save QA Changes
+                            Save Changes
                           </button>
                         </div>
                         {qaSaveMessage ? (
@@ -2615,7 +2568,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                   <div className="order-1 px-5 py-5">
                     <div className="flex items-center justify-between gap-3">
                       <div>
-                        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">Generated Scenarios</p>
                         <p className="mt-1 text-sm text-slate-600">5,000 scenarios generated from the approved market plan.</p>
                       </div>
                       {scenarioHandoff && !scenarioResults && (
@@ -2917,7 +2869,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
           <div className="flex items-center justify-between gap-3 px-5 py-5">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">Scenario Generation</p>
-              <p className="mt-1 text-sm text-slate-600">Generate and review scenario options separately from Trinity analysis.</p>
             </div>
             <button
               type="button"
@@ -2932,7 +2883,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
             <div className="border-t border-slate-100 px-5 py-5">
               <div className="flex items-center justify-between gap-3">
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#8c7554]">Generated Scenarios</p>
                   <p className="mt-1 text-sm text-slate-600">5,000 scenarios generated from the approved market plan.</p>
                 </div>
                 {scenarioHandoff && !scenarioResults && (
@@ -3787,6 +3737,7 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
           })
         const increaseCount = changedRows.filter((row) => row.deltaBudget > 0).length
         const decreaseCount = changedRows.filter((row) => row.deltaBudget < 0).length
+        const marketCountLabel = (count: number) => `${count} ${count === 1 ? 'market' : 'markets'}`
         return (
           <div
             className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 backdrop-blur-sm sm:items-center"
@@ -3807,9 +3758,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                       <p className="text-lg font-bold text-slate-900">{scenarioDisplayName(scenarioModal)}</p>
                       <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600">{scenarioModal.family}</span>
                     </div>
-                    <p className="mt-2 text-sm text-slate-600">
-                      States changed in this scenario, with original and new split plus original and new budget.
-                    </p>
                     <div className="mt-3 flex flex-wrap gap-2">
                       <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">Vol {formatSignedPct(scenarioModal.volume_uplift_pct, 2)}</span>
                       <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[11px] font-semibold text-blue-700">Rev {formatSignedPct(scenarioModal.revenue_uplift_pct, 2)}</span>
@@ -3853,38 +3801,33 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                     </button>
                   </div>
                 </div>
-                <div className="mt-4 grid gap-3 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,1.5fr)]">
-                  <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Split View</p>
-                    <div className="mt-2 inline-flex rounded-full border border-slate-200 bg-white p-1">
+                <div className="mt-4 grid items-stretch gap-3 lg:grid-cols-[280px_minmax(0,1fr)]">
+                  <div className="flex min-h-[86px] items-center justify-center rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                    <div className="inline-flex w-full max-w-[220px] rounded-full border border-slate-200 bg-white p-1.5 shadow-sm">
                       <button
                         type="button"
                         onClick={() => setScenarioModalSplitView('reach')}
-                        className={`rounded-full px-3 py-1 text-xs font-semibold transition ${scenarioModalSplitView === 'reach' ? 'bg-[#7b5c33] text-white' : 'text-slate-600 hover:text-slate-900'}`}
+                        className={`flex-1 rounded-full px-5 py-2 text-sm font-semibold transition ${scenarioModalSplitView === 'reach' ? 'bg-[#7b5c33] text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
                       >
-                        Reach Split
+                        Reach
                       </button>
                       <button
                         type="button"
                         onClick={() => setScenarioModalSplitView('spend')}
-                        className={`rounded-full px-3 py-1 text-xs font-semibold transition ${scenarioModalSplitView === 'spend' ? 'bg-[#7b5c33] text-white' : 'text-slate-600 hover:text-slate-900'}`}
+                        className={`flex-1 rounded-full px-5 py-2 text-sm font-semibold transition ${scenarioModalSplitView === 'spend' ? 'bg-[#7b5c33] text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
                       >
-                        Spend Split
+                        Spend
                       </button>
                     </div>
                   </div>
-                  <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="grid gap-3 sm:grid-cols-2">
                     <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3">
                       <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-emerald-700">Budget Increased</p>
-                      <p className="mt-2 text-2xl font-semibold text-emerald-900">{increaseCount}</p>
+                      <p className="mt-2 text-2xl font-semibold text-emerald-900">{marketCountLabel(increaseCount)}</p>
                     </div>
                     <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3">
                       <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-rose-700">Budget Decreased</p>
-                      <p className="mt-2 text-2xl font-semibold text-rose-900">{decreaseCount}</p>
-                    </div>
-                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-                      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-500">Changed States</p>
-                      <p className="mt-2 text-2xl font-semibold text-slate-900">{changedRows.length}</p>
+                      <p className="mt-2 text-2xl font-semibold text-rose-900">{marketCountLabel(decreaseCount)}</p>
                     </div>
                   </div>
                 </div>
@@ -3966,14 +3909,6 @@ export function BudgetAllocationDebugPage({ apiBaseUrl, config }: Props) {
                               <p className="font-semibold text-slate-900">{row.market}</p>
                               <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] ${tone.pill}`}>
                                 {isIncrease ? 'Increased' : 'Decreased'}
-                              </span>
-                            </div>
-                            <div className="mt-1 flex flex-wrap gap-2">
-                              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
-                                Salience {row.brandSalience != null ? formatMetric(row.brandSalience, 0) : 'n/a'}
-                              </span>
-                              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium text-slate-600">
-                                Mkt share {row.marketShareChange != null ? formatSignedPct(row.marketShareChange, 1) : 'n/a'}
                               </span>
                             </div>
                           </div>

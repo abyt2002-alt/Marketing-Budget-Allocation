@@ -60,6 +60,8 @@ type AutoConfigResponse = {
   markets_by_brand: Record<string, string[]>
   default_brand: string
   default_markets: string[]
+  default_baseline_budget?: number | null
+  brand_baseline_budgets?: Record<string, number>
   last_known_budget?: number | null
 }
 

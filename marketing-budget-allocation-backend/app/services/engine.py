@@ -892,6 +892,7 @@ def _build_auto_config() -> dict:
     brands = sorted(bm.keys())
     default_brand = brands[0] if brands else ""
     default_baseline_budget: float | None = None
+    baseline_budgets: dict[str, float] = {}
     try:
         model_df = _read_model_data(files["model_data"])
         baseline_budgets = _compute_brand_baseline_budgets(model_df, brands)
@@ -911,6 +912,7 @@ def _build_auto_config() -> dict:
         "default_brand": default_brand,
         "default_markets": bm.get(default_brand, []),
         "default_baseline_budget": default_baseline_budget,
+        "brand_baseline_budgets": baseline_budgets,
     }
     _AUTO_CONFIG_CACHE = out
     _AUTO_CONFIG_SIGNATURE = sig
