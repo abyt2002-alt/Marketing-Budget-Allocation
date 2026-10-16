@@ -55,7 +55,7 @@ tar \
   -czf "${RUNNER_TEMP}/release.tgz" \
   -C source .
 
-if tar -tzf "${RUNNER_TEMP}/release.tgz" | grep -E '(^|/)\.env($|\.)|(^|/)(app_data|analysis_state)\.db$|(^|/)promo_calendar_context_latest\.json$|(^|/)demo_data(/|$)|(^|/)\.git(/|$)|(^|/)id_(rsa|ed25519)$|\.pem$|\.key$'; then
+if tar -tzf "${RUNNER_TEMP}/release.tgz" | grep -E '(^|/)\.env(\.production|\.local|\.development)?$|(^|/)(app_data|analysis_state)\.db$|(^|/)promo_calendar_context_latest\.json$|(^|/)demo_data(/|$)|(^|/)\.git(/|$)|(^|/)id_(rsa|ed25519)$|\.pem$|\.key$'; then
   echo "release archive still contains protected or secret paths"
   exit 1
 fi

@@ -97,7 +97,7 @@ on_exit() {
 trap on_exit EXIT
 
 reject_tarball() {
-  if tar -tzf "${TARBALL}" | grep -E '^\.\./|^/|(^|/)\.\.(/|$)|(^|/)\.env($|\.)|(^|/)analysis_state\.db$|(^|/)app_data\.db$|(^|/)demo_data(/|$)'; then
+  if tar -tzf "${TARBALL}" | grep -E '^\.\./|^/|(^|/)\.\.(/|$)|(^|/)\.env(\.production|\.local|\.development)?$|(^|/)analysis_state\.db$|(^|/)app_data\.db$|(^|/)demo_data(/|$)'; then
     echo "tarball contains an unsafe or protected path"
     exit 1
   fi
