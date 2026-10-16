@@ -1,0 +1,5 @@
+# Optional, not installed. Lets the deploy user validate Nginx without any other root command.
+# Install only after review:
+#   sudo install -m 440 deploy/lightsail/sudoers-deploy /etc/sudoers.d/deploy-nginx-test
+#   sudo visudo -cf /etc/sudoers.d/deploy-nginx-test
+deploy ALL=(root) NOPASSWD: /usr/sbin/nginx -t
