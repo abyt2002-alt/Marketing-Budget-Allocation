@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import axios from 'axios'
+// CI marker: verify push-to-aws Lightsail deploy (2026-10-16)
 import {
   Activity,
   BarChart3,
