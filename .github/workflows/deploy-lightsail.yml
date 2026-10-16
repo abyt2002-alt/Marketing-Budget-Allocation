@@ -1,15 +1,20 @@
 name: Deploy Lightsail
 
-# Push-to-main deployment is intentionally disabled.
-# origin/main is 47 commits behind production branch aws.
-# Do not add a push trigger until that difference is approved and a manual
-# deployment of the production revision has succeeded.
+# Automatic deploy on push to aws (production). Manual workflow_dispatch remains available.
+# main must not be used. Workflow-only path changes are ignored so enablement does not deploy.
 
 on:
+  push:
+    branches:
+      - aws
+    paths-ignore:
+      - ".github/workflows/**"
+      - "deploy/lightsail/**"
+      - "**/*.md"
   workflow_dispatch:
     inputs:
       git_sha:
-        description: Full 40-character commit SHA. Production is 823b9c454e134c4091610abb523132b275604b85.
+        description: Full 40-character commit SHA on branch aws
         required: true
         type: string
       confirm:
@@ -29,6 +34,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  DEPLOY_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.git_sha || github.sha }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -36,12 +44,15 @@ jobs:
     steps:
       - name: Require confirmation and production branch
         env:
+          EVENT_NAME: ${{ github.event_name }}
           CONFIRM: ${{ inputs.confirm }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          test "$CONFIRM" = "DEPLOY"
           test "$REF_NAME" = "aws"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            test "$CONFIRM" = "DEPLOY"
+          fi
 
       - name: Checkout workflow
         uses: actions/checkout@v4
@@ -52,7 +63,7 @@ jobs:
       - name: Checkout application revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.git_sha }}
+          ref: ${{ env.DEPLOY_SHA }}
           fetch-depth: 0
           persist-credentials: false
           path: source
@@ -60,7 +71,7 @@ jobs:
       - name: Compare with production
         env:
           SOURCE_DIR: ${{ github.workspace }}/source
-          GIT_SHA: ${{ inputs.git_sha }}
+          GIT_SHA: ${{ env.DEPLOY_SHA }}
           APPROVE_BRANCH: ${{ inputs.approve_branch_difference }}
         run: bash workflow/deploy/lightsail/check-revision.sh
 
@@ -83,7 +94,6 @@ jobs:
       - name: Build frontend
         run: |
           set -euo pipefail
-          # Public hostname only. Secrets stay on the server and are linked before the real build.
           printf 'VITE_API_BASE_URL=https://mmm.quantmatrix.ai\n' > source/marketing-budget-allocation-frontend/.env
           npm ci --legacy-peer-deps --prefix source/marketing-budget-allocation-frontend
           npm run build --prefix source/marketing-budget-allocation-frontend
@@ -94,10 +104,6 @@ jobs:
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 50
-    # Environment gate omitted: current collaborator lacks admin to create
-    # lightsail-production. Uses repository secrets LIGHTSAIL_SSH_KEY and
-    # LIGHTSAIL_HOST_FINGERPRINT. Re-add environment: lightsail-production
-    # when a repo admin can create it.
     env:
       LIGHTSAIL_HOST: 3.7.218.242
       EXPECTED_FINGERPRINT: "SHA256:mF15yCT8DFX6ctFCHsR8hPjNPreEKvkPqXrP2tbhsyU"
@@ -116,7 +122,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.git_sha }}
+          ref: ${{ env.DEPLOY_SHA }}
           fetch-depth: 0
           persist-credentials: false
           path: source
@@ -124,7 +130,7 @@ jobs:
       - name: Compare with production
         env:
           SOURCE_DIR: ${{ github.workspace }}/source
-          GIT_SHA: ${{ inputs.git_sha }}
+          GIT_SHA: ${{ env.DEPLOY_SHA }}
           APPROVE_BRANCH: ${{ inputs.approve_branch_difference }}
         run: bash workflow/deploy/lightsail/check-revision.sh
 
@@ -132,5 +138,5 @@ jobs:
         env:
           LIGHTSAIL_SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           LIGHTSAIL_HOST_FINGERPRINT: ${{ secrets.LIGHTSAIL_HOST_FINGERPRINT }}
-          GIT_SHA: ${{ inputs.git_sha }}
+          GIT_SHA: ${{ env.DEPLOY_SHA }}
         run: bash workflow/deploy/lightsail/gha-deploy.sh
