@@ -117,8 +117,8 @@ replace_with_link() {
     esac
   fi
   mkdir -p "$(dirname "${dest}")"
-  ln -s "${persistent}" "${dest}"
-  [[ "$(stat -c %i "${dest}")" == "$(stat -c %i "${persistent}")" ]] || { echo "link mismatch ${relative}"; exit 1; }
+  ln -sfn "${persistent}" "${dest}"
+  [[ "$(readlink -f "${dest}")" == "$(readlink -f "${persistent}")" ]] || { echo "link mismatch ${relative}"; exit 1; }
 }
 
 publish_dist() {
