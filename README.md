@@ -115,6 +115,21 @@ If backend errors with `ModuleNotFoundError`:
 pip install -r requirements.txt
 ```
 
+## Production deployment (AWS Lightsail)
+
+Production is on Lightsail Account 2 at `https://mmm.quantmatrix.ai` (host `3.7.218.242`).
+
+| Item | Value |
+|---|---|
+| Deploy branch | `aws` (not `main`) |
+| Workflow | `.github/workflows/deploy-lightsail.yml` |
+| Trigger | Push to `aws` (app code). Workflow-only / markdown-only pushes are skipped. |
+| Manual | Actions → **Deploy Lightsail** → Run workflow |
+
+Server layout: `/opt/apps/mmm-app/current` → immutable `releases/<sha>`. Persistent `.env` files are symlinked and never overwritten by CI.
+
+See also the platform guide in the demos repo: [`aws-demos/docs/AWS_DEPLOYMENT.md`](https://github.com/abyt2002-alt/aws-demos/blob/main/docs/AWS_DEPLOYMENT.md).
+
 ## Security Notes
 - Never commit API keys.
 - Keep `.env` local only.
